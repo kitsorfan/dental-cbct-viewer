@@ -1226,15 +1226,29 @@ function renderAbout() {
 }
 
 // The live privacy panel reports what the browser itself says about this page.
-function cspActive() {
+// Some antivirus products intercept HTTPS and add their own hosts to the policy so they can
+// inject a script; the check reads the effective policy and names any such hosts.
+function cspStatus() {
   const policy = document.querySelector('meta[http-equiv="Content-Security-Policy"]')?.content || '';
-  return /default-src 'none'/.test(policy) && /connect-src 'none'/.test(policy);
+  if (!policy) return { on: false, hosts: [] };
+  const directives = {};
+  for (const part of policy.split(';')) {
+    const [name, ...sources] = part.trim().split(/\s+/);
+    if (name) directives[name.toLowerCase()] = sources;
+  }
+  const connect = directives['connect-src'] ?? directives['default-src'] ?? ['*'];
+  const open = connect.some((s) => s === '*' || /^(https?|wss?):$/i.test(s));
+  const hosts = [...new Set(Object.values(directives).flat()
+    .filter((s) => /^(https?|wss?):\/\//i.test(s))
+    .map((s) => s.replace(/^\w+:\/\//, '').split('/')[0]))];
+  return { on: !open, hosts };
 }
 
 function requestsAfterLoad() {
   const nav = performance.getEntriesByType('navigation')[0];
   const loaded = nav ? nav.loadEventEnd || nav.domContentLoadedEventEnd : 0;
-  return performance.getEntriesByType('resource').filter((e) => /^https?:/.test(e.name) && e.startTime > loaded).length;
+  const late = performance.getEntriesByType('resource').filter((e) => /^https?:/.test(e.name) && e.startTime > loaded);
+  return { count: late.length, hosts: [...new Set(late.map((e) => new URL(e.name).host))] };
 }
 
 async function storedItems() {
@@ -1257,9 +1271,14 @@ function setCheck(sel, ok, text) {
 async function renderPrivacy() {
   if ($('#center').hidden || $('[data-panel="privacy"]').hidden) return;
   const requests = requestsAfterLoad();
-  setCheck('#chkNetwork', requests === 0, requests ? t('privacy.check.network.some', { n: requests }) : t('privacy.check.network.none'));
-  const csp = cspActive();
-  setCheck('#chkCsp', csp, csp ? t('privacy.check.csp.on', { n: privacy.blocked }) : t('privacy.check.csp.off'));
+  setCheck('#chkNetwork', requests.count === 0, requests.count
+    ? t('privacy.check.network.some', { n: requests.count, hosts: requests.hosts.join(', ') })
+    : t('privacy.check.network.none'));
+  const csp = cspStatus();
+  const cspText = !csp.on ? t('privacy.check.csp.off')
+    : csp.hosts.length ? t('privacy.check.csp.modified', { hosts: csp.hosts.join(', '), n: privacy.blocked })
+      : t('privacy.check.csp.on', { n: privacy.blocked });
+  setCheck('#chkCsp', csp.on && !csp.hosts.length, cspText);
   const stored = await storedItems();
   setCheck('#chkStorage', stored === 0, stored ? t('privacy.check.storage.some', { n: stored }) : t('privacy.check.storage.none'));
   const mb = S.vol ? Math.round(S.vol.data.byteLength / 1048576) : 0;
