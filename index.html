@@ -1,65 +1,80 @@
 <!doctype html>
-<html lang="en" data-build="dev">
+<html lang="en" data-build="dev" data-version="dev">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src data: blob:; connect-src 'none'; font-src 'none'; media-src 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'; manifest-src 'none'; form-action 'none'; base-uri 'none'">
+  <meta name="referrer" content="no-referrer">
   <meta name="description" content="Open-source dental CBCT viewer that runs in the browser: panoramic, cross-sections, 3D, measurements and PDF reports. Scans never leave your computer.">
   <title>Dental CBCT Viewer</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2311161c'/%3E%3Cg transform='translate(4 4)' fill='none' stroke='%232ec4b6' stroke-linejoin='round'%3E%3Cpath stroke-width='1.8' d='M7.2 3.2c-2.4 0-4.2 1.9-4.2 4.4 0 2.4.9 4.2 1.8 6.2.8 1.8 1.1 3.8 1.5 5.8.3 1.5 1 2.4 2 2.4 1.2 0 1.7-1.1 2-2.6l.5-2.6c.2-1 .7-1.5 1.2-1.5s1 .5 1.2 1.5l.5 2.6c.3 1.5.8 2.6 2 2.6 1 0 1.7-.9 2-2.4.4-2 .7-4 1.5-5.8.9-2 1.8-3.8 1.8-6.2 0-2.5-1.8-4.4-4.2-4.4-1.7 0-2.6.9-4.8.9s-3.1-.9-4.8-.9z'/%3E%3Cpath stroke-width='1.5' stroke-dasharray='2 1.6' d='M.8 10.6h22.4'/%3E%3C/g%3E%3C/svg%3E">
   <link rel="stylesheet" href="src/style.css">
 </head>
 <body data-tool="navigate">
-  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <svg class="sprite" aria-hidden="true">
     <symbol id="i-logo" viewBox="0 0 24 24">
       <path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" d="M7.2 3.2c-2.4 0-4.2 1.9-4.2 4.4 0 2.4.9 4.2 1.8 6.2.8 1.8 1.1 3.8 1.5 5.8.3 1.5 1 2.4 2 2.4 1.2 0 1.7-1.1 2-2.6l.5-2.6c.2-1 .7-1.5 1.2-1.5s1 .5 1.2 1.5l.5 2.6c.3 1.5.8 2.6 2 2.6 1 0 1.7-.9 2-2.4.4-2 .7-4 1.5-5.8.9-2 1.8-3.8 1.8-6.2 0-2.5-1.8-4.4-4.2-4.4-1.7 0-2.6.9-4.8.9s-3.1-.9-4.8-.9z"/>
       <path fill="none" stroke="currentColor" stroke-width="1.5" stroke-dasharray="2 1.6" d="M.8 10.6h22.4"/>
     </symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round" d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></symbol>
+    <symbol id="i-navigate" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="6"/><path d="M12 2.5v5M12 16.5v5M2.5 12h5M16.5 12h5"/></g></symbol>
+    <symbol id="i-wl" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.2" fill="none" stroke="currentColor" stroke-width="1.8"/><path fill="currentColor" d="M12 3.8a8.2 8.2 0 0 1 0 16.4z"/></symbol>
+    <symbol id="i-pan" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18M3 12h18"/><path d="M9.5 5.5L12 3l2.5 2.5M9.5 18.5L12 21l2.5-2.5M5.5 9.5L3 12l2.5 2.5M18.5 9.5L21 12l-2.5 2.5"/></g></symbol>
+    <symbol id="i-zoom" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6.3"/><path d="M15.2 15.2L20.5 20.5M8 10.5h5M10.5 8v5"/></g></symbol>
+    <symbol id="i-ruler" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><path d="M3.8 15.6L15.6 3.8l4.6 4.6L8.4 20.2z"/><path d="M7.4 12l2 2M10.2 9.2l1.4 1.4M13 6.4l2 2"/></g></symbol>
+    <symbol id="i-angle" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5h16.5M4 19.5L15 4.5"/><path d="M10.2 19.5a6.2 6.2 0 0 0-2.2-4.7"/></g></symbol>
+    <symbol id="i-arch" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M3.5 18c1.6-8 4.6-11.5 8.5-11.5s6.9 3.5 8.5 11.5"/><circle cx="3.5" cy="18" r="1.4" fill="currentColor"/><circle cx="12" cy="6.5" r="1.4" fill="currentColor"/><circle cx="20.5" cy="18" r="1.4" fill="currentColor"/></g></symbol>
+    <symbol id="i-invert" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path fill="currentColor" d="M12 4h4.5A3.5 3.5 0 0 1 20 7.5v9a3.5 3.5 0 0 1-3.5 3.5H12z"/></symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.4 2.5 3.5 5.3 3.5 8.5s-1.1 6-3.5 8.5c-2.4-2.5-3.5-5.3-3.5-8.5s1.1-6 3.5-8.5z"/></g></symbol>
+    <symbol id="i-help" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="8.5"/><path d="M9.6 9.6a2.5 2.5 0 1 1 3.5 2.3c-.8.4-1.1 1-1.1 1.8v.3M12 16.9v.2"/></g></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5.6M12 7.6v.2"/></g></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><path d="M12 3l7.5 3v5.5c0 4.6-3.2 8.2-7.5 9.5-4.3-1.3-7.5-4.9-7.5-9.5V6z"/><path d="M8.8 12.2l2.2 2.2 4.2-4.4"/></g></symbol>
+    <symbol id="i-doc" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><path d="M6 3h8.5L19 7.5V21H6z"/><path d="M14 3v5h5M9 12.5h7M9 16h5"/></g></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M6 6l12 12M18 6L6 18"/></symbol>
     <symbol id="i-camera" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" d="M3.5 8h3.5l1.8-2.6h6.4L17 8h3.5v11h-17z"/><circle cx="12" cy="13.2" r="3.4" fill="none" stroke="currentColor" stroke-width="1.8"/></symbol>
     <symbol id="i-expand" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></symbol>
     <symbol id="i-collapse" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/></symbol>
     <symbol id="i-layout" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 11h18M10 11v9M15.5 11v9M14 4v7"/></g></symbol>
+    <symbol id="i-pdf" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M6 3h8.5L19 7.5V21H6z"/><path d="M14 3v5h5M9 13h7M9 16.5h7"/></g></symbol>
     <symbol id="i-eraser" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 20h11M5.1 14.3l8.2-8.2a2 2 0 0 1 2.8 0l3 3a2 2 0 0 1 0 2.8L12.4 18.6a2 2 0 0 1-1.4.6H9.3a2 2 0 0 1-1.4-.6l-2.8-2.8a1 1 0 0 1 0-1.5z"/><path d="M10 9.5l5 5"/></g></symbol>
     <symbol id="i-reset" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12a7.5 7.5 0 1 0 2.3-5.4"/><path d="M4.5 4.5v4h4"/></g></symbol>
-    <symbol id="i-pdf" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M6 3h8.5L19 7.5V21H6z"/><path d="M14 3v5h5M9 13h7M9 16.5h7"/></g></symbol>
   </svg>
 
   <header class="topbar">
     <div class="brand"><svg class="logo"><use href="#i-logo"/></svg><span data-i18n="app.name">Dental CBCT Viewer</span></div>
-    <button id="openBtn" class="primary" data-i18n="open" data-i18n-title="open.title">Open scan…</button>
+    <button id="openBtn" class="primary with-icon" data-i18n-title="open.title"><svg><use href="#i-folder"/></svg><span data-i18n="open">Open scan…</span></button>
     <input type="file" id="folderInput" webkitdirectory multiple hidden>
     <select id="series" hidden></select>
     <div class="patient" id="patient"></div>
-    <div class="group tools" role="toolbar">
-      <button data-tool="navigate" data-i18n="tool.navigate" data-i18n-title="tool.navigate.title">Navigate</button>
-      <button data-tool="wl" data-i18n="tool.wl" data-i18n-title="tool.wl.title">W/L</button>
-      <button data-tool="pan" data-i18n="tool.pan" data-i18n-title="tool.pan.title">Pan</button>
-      <button data-tool="zoom" data-i18n="tool.zoom" data-i18n-title="tool.zoom.title">Zoom</button>
-      <button data-tool="measure" data-i18n="tool.measure" data-i18n-title="tool.measure.title">Measure</button>
-      <button data-tool="angle" data-i18n="tool.angle" data-i18n-title="tool.angle.title">Angle</button>
-      <button data-tool="arch" data-i18n="tool.arch" data-i18n-title="tool.arch.title">Draw arch</button>
+    <div class="segmented tools" role="toolbar">
+      <button data-tool="navigate" data-i18n-title="tool.navigate.title" data-i18n-aria="tool.navigate"><svg><use href="#i-navigate"/></svg></button>
+      <button data-tool="wl" data-i18n-title="tool.wl.title" data-i18n-aria="tool.wl"><svg><use href="#i-wl"/></svg></button>
+      <button data-tool="pan" data-i18n-title="tool.pan.title" data-i18n-aria="tool.pan"><svg><use href="#i-pan"/></svg></button>
+      <button data-tool="zoom" data-i18n-title="tool.zoom.title" data-i18n-aria="tool.zoom"><svg><use href="#i-zoom"/></svg></button>
+      <button data-tool="measure" data-i18n-title="tool.measure.title" data-i18n-aria="tool.measure"><svg><use href="#i-ruler"/></svg></button>
+      <button data-tool="angle" data-i18n-title="tool.angle.title" data-i18n-aria="tool.angle"><svg><use href="#i-angle"/></svg></button>
+      <button data-tool="arch" data-i18n-title="tool.arch.title" data-i18n-aria="tool.arch"><svg><use href="#i-arch"/></svg></button>
     </div>
     <div class="group">
-      <select id="preset" data-i18n-title="preset.title"></select>
-      <button id="invert" data-i18n="invert" data-i18n-title="invert.title">Invert</button>
+      <select id="preset" data-i18n-title="preset.title" data-i18n-aria="preset.title"></select>
+      <button id="invert" class="icon bordered" data-i18n-title="invert.title" data-i18n-aria="invert.title"><svg><use href="#i-invert"/></svg></button>
     </div>
     <div class="group">
-      <label class="toggle" data-i18n-title="canals.title"><input type="checkbox" id="showCanals" checked> <span data-i18n="canals">Canals</span></label>
-      <label class="toggle" data-i18n-title="guides.title"><input type="checkbox" id="showGuides" checked> <span data-i18n="guides">Guides</span></label>
+      <label class="switch" data-i18n-title="canals.title"><input type="checkbox" id="showCanals" checked><span data-i18n="canals">Canals</span></label>
+      <label class="switch" data-i18n-title="guides.title"><input type="checkbox" id="showGuides" checked><span data-i18n="guides">Guides</span></label>
     </div>
     <div class="group">
-      <button id="clearMeasures" class="icon bordered" data-i18n-title="clear.title"><svg><use href="#i-eraser"/></svg></button>
-      <button id="resetViews" class="icon bordered" data-i18n-title="reset.title"><svg><use href="#i-reset"/></svg></button>
+      <button id="clearMeasures" class="icon bordered" data-i18n-title="clear.title" data-i18n-aria="clear.title"><svg><use href="#i-eraser"/></svg></button>
+      <button id="resetViews" class="icon bordered" data-i18n-title="reset.title" data-i18n-aria="reset.title"><svg><use href="#i-reset"/></svg></button>
     </div>
     <div class="group needs-scan">
       <button id="snapshotBtn" class="with-icon" data-i18n-title="snapshot.title"><svg><use href="#i-layout"/></svg><span data-i18n="snapshot">Snapshot</span></button>
       <button id="reportBtn" class="with-icon accent" data-i18n-title="report.button.title"><svg><use href="#i-pdf"/></svg><span data-i18n="report.button">PDF report</span></button>
     </div>
     <div class="group">
-      <select id="lang" data-i18n-title="lang.title">
-        <option value="en">EN</option>
-        <option value="el">ΕΛ</option>
-      </select>
-      <button id="helpBtn" data-i18n-title="help.button">?</button>
+      <label class="lang" data-i18n-title="lang.title"><svg><use href="#i-globe"/></svg><select id="lang" data-i18n-aria="lang.title"></select></label>
+      <button id="helpBtn" class="icon bordered" data-i18n-title="help.button" data-i18n-aria="help.button"><svg><use href="#i-help"/></svg></button>
+      <button id="aboutBtn" class="icon bordered" data-i18n-title="about.button" data-i18n-aria="about.button"><svg><use href="#i-info"/></svg></button>
     </div>
   </header>
 
@@ -69,7 +84,7 @@
         <span class="dot"></span><span class="vtitle" data-i18n="view.pano">Panoramic</span><span class="vinfo"></span>
         <div class="vctl">
           <select id="arch" data-i18n-title="pano.arch.title"></select>
-          <label data-i18n-title="pano.thickness.title"><span data-i18n="pano.thickness">Thickness</span>
+          <label class="range" data-i18n-title="pano.thickness.title"><span data-i18n="pano.thickness">Thickness</span>
             <input type="range" id="panoThick" min="0" max="30" step="0.5" value="8">
             <output id="panoThickOut">8 mm</output>
           </label>
@@ -93,8 +108,10 @@
             <option value="mip" data-i18n="vr.mip">MIP</option>
             <option value="xray" data-i18n="vr.xray">X-ray</option>
           </select>
-          <input type="range" id="vrLevel" min="0" max="1" step="0.005" value="0.3" data-i18n-title="vr.level.title">
-          <output id="vrLevelOut"></output>
+          <label class="range" data-i18n-title="vr.level.title">
+            <input type="range" id="vrLevel" min="0" max="1" step="0.005" value="0.3">
+            <output id="vrLevelOut"></output>
+          </label>
         </div>
         <div class="vbtns"><button class="icon save" data-i18n-title="save.title"><svg><use href="#i-camera"/></svg></button><button class="icon expand"><svg class="i-expand"><use href="#i-expand"/></svg><svg class="i-collapse"><use href="#i-collapse"/></svg></button></div>
       </div>
@@ -113,6 +130,7 @@
       <div class="vhead">
         <span class="dot"></span><span class="vtitle" data-i18n="view.cross">Cross-section</span><span class="vinfo"></span>
         <div class="vctl">
+          <select id="csStep" data-i18n-title="cs.step.title"></select>
           <select id="csWidth" data-i18n-title="cs.width.title">
             <option value="30">30 mm</option>
             <option value="40" selected>40 mm</option>
@@ -144,6 +162,7 @@
   <footer class="status">
     <span id="statusHover"></span>
     <span id="statusMsg"></span>
+    <button id="privacyBadge" class="badge" data-i18n-title="tab.privacy"><svg><use href="#i-shield"/></svg><span data-i18n="privacy.badge"></span></button>
     <span id="statusWL"></span>
   </footer>
 
@@ -153,10 +172,11 @@
       <h1 data-i18n="welcome.title">Open a CBCT scan</h1>
       <p data-i18n-html="welcome.body"></p>
       <div class="actions">
-        <button id="welcomeOpen" class="primary big" data-i18n="welcome.choose">Choose folder…</button>
+        <button id="welcomeOpen" class="primary big with-icon"><svg><use href="#i-folder"/></svg><span data-i18n="welcome.choose">Choose folder…</span></button>
         <button id="welcomeDemo" class="big ghost" data-i18n="welcome.demo">Try the demo scan</button>
       </div>
       <p class="hint" data-i18n="welcome.hint"></p>
+      <button id="welcomePrivacy" class="link with-icon"><svg><use href="#i-shield"/></svg><span data-i18n="welcome.privacy"></span></button>
       <p class="error" id="welcomeError" hidden></p>
     </div>
   </div>
@@ -170,36 +190,92 @@
     </div>
   </div>
 
-  <div id="help" class="help" hidden>
-    <div class="sheet">
-      <button class="close" aria-label="Close">×</button>
-      <h2 data-i18n="help.heading">Controls</h2>
-      <div class="cols">
-        <dl>
-          <dt data-i18n="help.left.k"></dt><dd data-i18n="help.left.v"></dd>
-          <dt data-i18n="help.wheel.k"></dt><dd data-i18n="help.wheel.v"></dd>
-          <dt data-i18n="help.shiftwheel.k"></dt><dd data-i18n="help.shiftwheel.v"></dd>
-          <dt data-i18n="help.right.k"></dt><dd data-i18n="help.right.v"></dd>
-          <dt data-i18n="help.middle.k"></dt><dd data-i18n="help.middle.v"></dd>
-          <dt data-i18n="help.ctrlwheel.k"></dt><dd data-i18n="help.ctrlwheel.v"></dd>
-          <dt data-i18n="help.dbl.k"></dt><dd data-i18n="help.dbl.v"></dd>
-        </dl>
-        <dl>
-          <dt data-i18n="help.3d.k"></dt><dd data-i18n="help.3d.v"></dd>
-          <dt data-i18n="help.keys.k"></dt><dd data-i18n="help.keys.v"></dd>
-          <dt data-i18n="help.arrows.k"></dt><dd data-i18n="help.arrows.v"></dd>
-          <dt data-i18n="help.f.k"></dt><dd data-i18n="help.f.v"></dd>
-          <dt data-i18n="help.toggles.k"></dt><dd data-i18n="help.toggles.v"></dd>
-          <dt data-i18n="help.del.k"></dt><dd data-i18n="help.del.v"></dd>
-          <dt data-i18n="help.esc.k"></dt><dd data-i18n="help.esc.v"></dd>
-        </dl>
+  <div id="center" class="center" hidden>
+    <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="centerTitle">
+      <header class="center-head">
+        <div class="brand" id="centerTitle"><svg class="logo"><use href="#i-logo"/></svg><span data-i18n="app.name"></span></div>
+        <nav class="tabs" role="tablist">
+          <button role="tab" data-tab="guide"><svg><use href="#i-help"/></svg><span data-i18n="tab.guide"></span></button>
+          <button role="tab" data-tab="privacy"><svg><use href="#i-shield"/></svg><span data-i18n="tab.privacy"></span></button>
+          <button role="tab" data-tab="about"><svg><use href="#i-info"/></svg><span data-i18n="tab.about"></span></button>
+          <button role="tab" data-tab="terms"><svg><use href="#i-doc"/></svg><span data-i18n="tab.terms"></span></button>
+        </nav>
+        <button class="icon center-close" data-i18n-title="close" data-i18n-aria="close"><svg><use href="#i-close"/></svg></button>
+      </header>
+      <div class="center-body">
+        <section data-panel="guide">
+          <h2 data-i18n="guide.start.title"></h2>
+          <div class="prose" data-i18n-html="guide.start.html"></div>
+          <h2 data-i18n="guide.controls.title"></h2>
+          <div class="cols">
+            <dl>
+              <dt data-i18n="help.left.k"></dt><dd data-i18n="help.left.v"></dd>
+              <dt data-i18n="help.wheel.k"></dt><dd data-i18n="help.wheel.v"></dd>
+              <dt data-i18n="help.shiftwheel.k"></dt><dd data-i18n="help.shiftwheel.v"></dd>
+              <dt data-i18n="help.right.k"></dt><dd data-i18n="help.right.v"></dd>
+              <dt data-i18n="help.middle.k"></dt><dd data-i18n="help.middle.v"></dd>
+              <dt data-i18n="help.ctrlwheel.k"></dt><dd data-i18n="help.ctrlwheel.v"></dd>
+              <dt data-i18n="help.dbl.k"></dt><dd data-i18n="help.dbl.v"></dd>
+            </dl>
+            <dl>
+              <dt data-i18n="help.3d.k"></dt><dd data-i18n="help.3d.v"></dd>
+              <dt data-i18n="help.keys.k"></dt><dd data-i18n="help.keys.v"></dd>
+              <dt data-i18n="help.arrows.k"></dt><dd data-i18n="help.arrows.v"></dd>
+              <dt data-i18n="help.f.k"></dt><dd data-i18n="help.f.v"></dd>
+              <dt data-i18n="help.toggles.k"></dt><dd data-i18n="help.toggles.v"></dd>
+              <dt data-i18n="help.del.k"></dt><dd data-i18n="help.del.v"></dd>
+              <dt data-i18n="help.esc.k"></dt><dd data-i18n="help.esc.v"></dd>
+            </dl>
+          </div>
+          <h2 data-i18n="guide.scans.title"></h2>
+          <div class="prose" data-i18n-html="guide.scans.html"></div>
+          <h2 data-i18n="guide.tips.title"></h2>
+          <p data-i18n="help.note"></p>
+          <p class="muted small" data-i18n="help.disclaimer"></p>
+        </section>
+
+        <section data-panel="privacy" hidden>
+          <h2 class="hero"><svg><use href="#i-shield"/></svg><span data-i18n="privacy.title"></span></h2>
+          <p class="lead" data-i18n="privacy.intro"></p>
+          <div class="live">
+            <div class="live-head"><span class="pulse"></span><b data-i18n="privacy.live.title"></b><span class="muted" data-i18n="privacy.live.note"></span></div>
+            <div class="check" id="chkNetwork"><span class="state"></span><span class="k" data-i18n="privacy.check.network"></span><span class="v"></span></div>
+            <div class="check" id="chkCsp"><span class="state"></span><span class="k" data-i18n="privacy.check.csp"></span><span class="v"></span></div>
+            <div class="check" id="chkStorage"><span class="state"></span><span class="k" data-i18n="privacy.check.storage"></span><span class="v"></span></div>
+            <div class="check" id="chkMemory"><span class="state"></span><span class="k" data-i18n="privacy.check.memory"></span><span class="v"></span></div>
+            <div class="live-actions"><button id="closeScanBtn" class="danger" data-i18n="privacy.close"></button></div>
+          </div>
+          <h2 data-i18n="privacy.how.title"></h2>
+          <div class="prose" data-i18n-html="privacy.how.html"></div>
+          <h2 data-i18n="security.title"></h2>
+          <div class="prose" data-i18n-html="security.html"></div>
+          <p class="muted" data-i18n="privacy.verify"></p>
+        </section>
+
+        <section data-panel="about" hidden>
+          <div class="about-hero">
+            <svg class="logo big"><use href="#i-logo"/></svg>
+            <div><h2 data-i18n="app.name"></h2><p class="muted" id="aboutVersion"></p></div>
+          </div>
+          <p class="lead" data-i18n="about.tagline"></p>
+          <p class="creator" id="aboutCreator"></p>
+          <h2 data-i18n="about.made.title"></h2>
+          <div class="prose" data-i18n-html="about.made.html"></div>
+          <div class="links">
+            <a id="aboutSource" target="_blank" rel="noopener noreferrer" data-i18n="about.source"></a>
+            <a id="aboutIssues" target="_blank" rel="noopener noreferrer" data-i18n="about.issues"></a>
+            <a id="aboutLicense" target="_blank" rel="noopener noreferrer" data-i18n="about.license"></a>
+            <a id="offlineLink" download="dental-cbct-viewer.html" hidden data-i18n="help.offline"></a>
+          </div>
+          <p class="muted small" data-i18n="about.copyright"></p>
+        </section>
+
+        <section data-panel="terms" hidden>
+          <h2 data-i18n="terms.title"></h2>
+          <p class="muted small" data-i18n="terms.updated"></p>
+          <div class="prose" data-i18n-html="terms.html"></div>
+        </section>
       </div>
-      <p class="note" data-i18n="help.note"></p>
-      <p class="note" data-i18n="help.disclaimer"></p>
-      <p class="links">
-        <a id="offlineLink" download="dental-cbct-viewer.html" hidden data-i18n="help.offline">Download for offline use</a>
-        <a id="sourceLink" target="_blank" rel="noopener" data-i18n="help.source">Source code</a>
-      </p>
     </div>
   </div>
 

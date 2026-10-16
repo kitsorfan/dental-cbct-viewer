@@ -235,6 +235,17 @@ export class VolumeView {
     this.render();
   }
 
+  // Forget the volume (closing a scan): free the GPU texture and blank the canvas.
+  clear() {
+    if (!this.gl) return;
+    const gl = this.gl;
+    if (this.texture) gl.deleteTexture(this.texture);
+    this.texture = null;
+    this.ready = false;
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+  }
+
   // Render at an exact pixel size into a new 2D canvas (for exports), then restore.
   snapshot(width, height) {
     if (!this.ready) return null;

@@ -5,12 +5,15 @@ import { scanEntries, loadSeries, entriesFromDrop, entriesFromInput } from './di
 import { makePhantom } from './phantom.js';
 import { createReport, CSS_PER_MM, PIXEL_RATIO } from './report.js';
 import { drawLogo } from './brand.js';
-import { t, setLanguage, detectLanguage, getLanguage } from './i18n.js';
+import { t, setLanguage, detectLanguage, getLanguage, LANGUAGES, localeFor, rememberLanguageInUrl } from './i18n.js';
 
 const $ = (sel) => document.querySelector(sel);
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
 const REPO_URL = 'https://github.com/kitsorfan/dental-cbct-viewer';
+const CREATOR = 'Kitsos Orfanopoulos';
+const CROSS_STEPS = [0.5, 1, 2, 5]; // mm
+const LEGACY_STORAGE_KEYS = ['dental-cbct-viewer.lang']; // written by v1.0.0, removed on start
 const KINDS_2D = ['pano', 'axial', 'cross', 'coronal', 'sagittal'];
 const COLORS = {
   axial: '#4ea1ff', coronal: '#3fd08f', sagittal: '#ff9f43',
@@ -56,6 +59,8 @@ const S = {
   panoThick: 8,
   panoMode: 'avg',
   csIndex: 0,
+  csMm: 0,
+  csStep: 1,
   csWidth: 40,
   canals: [],
   measures: [],
@@ -190,14 +195,27 @@ function setCursor(p) {
   S.cursor = [clamp(p[0], 0, nx - 1), clamp(p[1], 0, ny - 1), clamp(p[2], 0, nz - 1)];
 }
 
+// The cross-section position is kept in millimetres so stepping by 1 mm never drifts.
+function setCross(index) {
+  if (!S.arch) return;
+  S.csIndex = clamp(Math.round(index), 0, S.arch.M - 1);
+  S.csMm = S.csIndex * S.vol.sx;
+}
+
+function setCrossMm(value) {
+  if (!S.arch) return;
+  S.csMm = clamp(value, 0, (S.arch.M - 1) * S.vol.sx);
+  S.csIndex = Math.round(S.csMm / S.vol.sx);
+}
+
 function navigate(vp, u, v) {
   const p = imageToVoxel(vp.kind, u, v, vp.plane);
   if (!p) return;
   setCursor(p);
-  if (vp.kind === 'pano') S.csIndex = p[3];
+  if (vp.kind === 'pano') setCross(p[3]);
   if (vp.kind === 'axial' && S.arch) {
     const near = R.nearestOnArch(S.arch, p[0], p[1]);
-    if (near.dist * S.vol.sx < 15) S.csIndex = near.index;
+    if (near.dist * S.vol.sx < 15) setCross(near.index);
   }
   refresh();
 }
@@ -288,7 +306,7 @@ const hooks = {
         S.panoOffset = clamp(Math.round((S.panoOffset - dir * 0.5 * fast) * 10) / 10, -20, 20);
         break;
       case 'cross':
-        if (S.arch) S.csIndex = clamp(S.csIndex + dir * Math.round(fast / S.vol.sx), 0, S.arch.M - 1);
+        setCrossMm(S.csMm + dir * fast * S.csStep);
         break;
     }
     refresh();
@@ -336,7 +354,7 @@ function selectArch(idx) {
   const entry = S.arches[idx];
   S.arch = entry ? (entry.built ||= R.buildArch(entry.points)) : null;
   S.panoOffset = 0;
-  if (S.arch) S.csIndex = Math.floor(S.arch.M / 2);
+  setCross(S.arch ? Math.floor(S.arch.M / 2) : 0);
   for (const c of S.canals) {
     if (!S.arch) { c.proj = null; continue; }
     c.proj = c.dense.map((p) => {
@@ -572,12 +590,26 @@ function drawOverlay(vp, ctx) {
       const [X, Y] = P(S.csIndex, Z(S.cursor[2]));
       crosshair(vp, ctx, X, Y, COLORS.cross, COLORS.axial);
     }
-    for (const tick of vp.report?.ticks ?? []) {
-      const [X] = P(tick.index, 0);
+    const ticks = vp.report?.ticks ?? [];
+    if (ticks.length) {
       const [, top] = vp.toScreen(0, 0);
       const [, bottom] = vp.toScreen(0, vp.plane.h);
-      path(ctx, [[X, top], [X, bottom]], COLORS.cross, 1, { dash: [3, 3], alpha: 0.75 });
-      label(ctx, String(tick.label), X, top + 4, { align: 'center', baseline: 'top', color: '#0b1016', bg: COLORS.cross, size: 10, weight: 700 });
+      const [x0] = P(ticks[0].index, 0);
+      const [x1] = P(ticks[ticks.length - 1].index, 0);
+      ctx.save();
+      ctx.fillStyle = 'rgba(255, 95, 168, 0.14)';
+      ctx.fillRect(Math.min(x0, x1) - 2, top, Math.abs(x1 - x0) + 4, bottom - top);
+      ctx.restore();
+      const spacing = ticks.length > 1 ? Math.abs(x1 - x0) / (ticks.length - 1) : 99;
+      const every = Math.max(1, Math.ceil(24 / spacing));
+      const dense = ticks.length > 16;
+      ticks.forEach((tick, k) => {
+        const [X] = P(tick.index, 0);
+        path(ctx, [[X, top], [X, bottom]], COLORS.cross, 1, { dash: dense ? [] : [3, 3], alpha: dense ? 0.5 : 0.75 });
+        if (k % every === 0) {
+          label(ctx, String(tick.label), X, top + 4, { align: 'center', baseline: 'top', color: '#0b1016', bg: COLORS.cross, size: dense ? 9 : 10, weight: 700 });
+        }
+      });
     }
     const name = S.arches[S.archIdx] ? archName(S.arches[S.archIdx]) : '';
     const off = S.panoOffset ? `  ·  ${t('info.offset', { v: `${S.panoOffset > 0 ? '+' : ''}${S.panoOffset.toFixed(1)}` })}` : '';
@@ -668,18 +700,19 @@ function drawEdgeLabels(vp, ctx) {
 }
 
 function drawScaleBar(vp, ctx) {
-  const target = (vp.report?.compact ? 46 : 90) / vp.cssPerMm;
+  const compact = vp.report?.compact;
+  const target = (compact ? 24 : 90) / vp.cssPerMm;
   const len = [1, 2, 5, 10, 20, 50, 100].find((v) => v >= target * 0.6) ?? 100;
   const px = len * vp.cssPerMm;
-  const x1 = vp.cssW - 14, x0 = x1 - px, y = vp.cssH - 26;
+  const x1 = vp.cssW - (compact ? 6 : 14), x0 = x1 - px, y = vp.cssH - (compact ? 6 : 26);
   ctx.save();
   ctx.strokeStyle = 'rgba(232, 237, 243, 0.8)';
-  ctx.lineWidth = 1.5;
+  ctx.lineWidth = compact ? 1 : 1.5;
   ctx.beginPath();
-  ctx.moveTo(x0, y - 4); ctx.lineTo(x0, y); ctx.lineTo(x1, y); ctx.lineTo(x1, y - 4);
+  ctx.moveTo(x0, y - 3); ctx.lineTo(x0, y); ctx.lineTo(x1, y); ctx.lineTo(x1, y - 3);
   ctx.stroke();
   ctx.restore();
-  label(ctx, `${len} mm`, (x0 + x1) / 2, y - 6, { align: 'center', size: 11, color: 'rgba(232, 237, 243, 0.85)' });
+  label(ctx, `${len} mm`, (x0 + x1) / 2, y - (compact ? 4 : 6), { align: 'center', size: compact ? 8 : 11, color: 'rgba(232, 237, 243, 0.85)' });
 }
 
 // ---------------------------------------------------------------- exports
@@ -826,24 +859,30 @@ async function createPdfReport() {
       tiles.push({ title: t('view.sagittal'), render: (w, h) => renderPlane('sagittal', R.sagittal(S.vol, ix), w, h, { measureKey: `s${ix}`, slice: [ix, iy, iz] }) });
     }
 
+    // Serial cross-sections every S.csStep mm along the whole arch (1 mm by default).
     let cross = null;
     if (pano) {
-      const count = 12;
       const a = S.arch;
-      const start = Math.round(a.M * 0.06), end = Math.round(a.M * 0.94);
-      const step = (end - start) / (count - 1);
-      const items = Array.from({ length: count }, (_, k) => {
-        const index = Math.round(start + k * step);
-        return { index, label: k + 1, detail: `${(index * sx).toFixed(1)} mm` };
-      });
-      const planes = items.map((it) => R.crossSection(S.vol, a, it.index, mm(S.panoOffset), mm(S.csWidth), 1));
-      cross = {
-        title: t('report.cross.title'),
-        subtitle: t('report.cross.caption', { step: (step * sx).toFixed(1), width: S.csWidth }),
-        aspect: physical(planes[0]),
-        items,
-        render: (i, w, h) => renderPlane('cross', planes[i], w, h, { compact: true }),
-      };
+      const step = S.csStep;
+      const lengthMm = (a.M - 1) * sx;
+      const first = Math.ceil(2 / step) * step;
+      const fmt = (v) => v.toFixed(step < 1 ? 1 : 0);
+      const items = [];
+      for (let k = 0; first + k * step <= lengthMm - 2 + 1e-6 && items.length < 400; k++) {
+        const pos = first + k * step;
+        items.push({ index: Math.round(pos / sx), label: k + 1, detail: `${fmt(pos)} mm` });
+      }
+      if (items.length) {
+        const plane = (it) => R.crossSection(S.vol, a, it.index, mm(S.panoOffset), mm(S.csWidth), 1);
+        cross = {
+          title: t('report.cross.title'),
+          subtitle: t('report.cross.caption', { step: String(step), width: S.csWidth }),
+          range: (from, to, total) => t('report.cross.range', { from, to, total }),
+          aspect: physical(plane(items[0])),
+          items,
+          render: (it, w, h) => renderPlane('cross', plane(it), w, h, { compact: true }),
+        };
+      }
     }
 
     const viewTiles = ['axial', 'cross', 'coronal', 'sagittal']
@@ -864,7 +903,7 @@ async function createPdfReport() {
       appName: t('app.name'),
       documentTitle: `${t('report.title')} – ${m.demo ? t('patient.demo') : m.patientName || ''}`,
       patient: m.demo ? t('patient.demo') : m.patientName || '',
-      created: t('report.created', { v: now.toLocaleString(getLanguage() === 'el' ? 'el-GR' : 'en-GB') }),
+      created: t('report.created', { v: now.toLocaleString(localeFor()) }),
       banner: m.demo ? t('msg.demo') : '',
       disclaimer: t('help.disclaimer'),
       pageLabel: (n, total) => t('report.page', { n, total }),
@@ -979,14 +1018,25 @@ function applyVrLevel(level) {
   vr.render();
 }
 
-function applyLanguage(lang) {
+function fillStepSelect() {
+  const sel = $('#csStep');
+  sel.innerHTML = '';
+  for (const v of CROSS_STEPS) sel.append(new Option(t('cs.step', { v }), String(v)));
+  sel.value = String(S.csStep);
+}
+
+function applyLanguage(lang, chosen = false) {
   setLanguage(lang);
+  if (chosen) rememberLanguageInUrl();
   $('#lang').value = getLanguage();
   fillPresetSelect();
+  fillStepSelect();
   if (S.vol) fillArchSelect();
   renderPatient();
   renderStatusWl();
   renderMessage();
+  renderAbout();
+  renderPrivacy();
   if (vr && !vr.failed && S.vol) applyVrLevel(Number($('#vrLevel').value));
   if (vr?.failed) vr.el.querySelector('.empty').textContent = t('err.3d', { msg: t(`err.${vr.failed}`) });
   document.querySelectorAll('.view .expand').forEach((b) => {
@@ -998,7 +1048,7 @@ function applyLanguage(lang) {
 function bindUi() {
   document.querySelectorAll('[data-tool]').forEach((b) => b.addEventListener('click', () => setTool(b.dataset.tool)));
   $('#preset').addEventListener('change', (e) => applyPreset(e.target.value));
-  $('#lang').addEventListener('change', (e) => applyLanguage(e.target.value));
+  $('#lang').addEventListener('change', (e) => applyLanguage(e.target.value, true));
 
   $('#invert').addEventListener('click', () => {
     S.invert = !S.invert;
@@ -1021,10 +1071,18 @@ function bindUi() {
     el.querySelector('.save').addEventListener('click', () => saveView(el.dataset.view));
   });
 
-  const help = $('#help');
-  $('#helpBtn').addEventListener('click', () => { help.hidden = !help.hidden; });
-  help.addEventListener('click', (e) => { if (e.target === help || e.target.closest('.close')) help.hidden = true; });
-  $('#sourceLink').href = REPO_URL;
+  $('#helpBtn').addEventListener('click', () => openCenter('guide'));
+  $('#aboutBtn').addEventListener('click', () => openCenter('about'));
+  $('#privacyBadge').addEventListener('click', () => openCenter('privacy'));
+  $('#welcomePrivacy').addEventListener('click', () => openCenter('privacy'));
+  const center = $('#center');
+  center.addEventListener('click', (e) => { if (e.target === center || e.target.closest('.center-close')) closeCenter(); });
+  center.querySelectorAll('[data-tab]').forEach((b) => b.addEventListener('click', () => openCenter(b.dataset.tab)));
+  $('#closeScanBtn').addEventListener('click', closeScan);
+  window.addEventListener('hashchange', routeHash);
+  $('#aboutSource').href = REPO_URL;
+  $('#aboutIssues').href = `${REPO_URL}/issues`;
+  $('#aboutLicense').href = `${REPO_URL}/blob/main/LICENSE`;
   const offline = $('#offlineLink');
   if (document.documentElement.dataset.build === 'bundle' && location.protocol.startsWith('http')) {
     offline.href = location.pathname;
@@ -1040,6 +1098,7 @@ function bindUi() {
   });
   $('#panoMode').addEventListener('change', (e) => { S.panoMode = e.target.value; refresh(); });
   $('#csWidth').addEventListener('change', (e) => { S.csWidth = Number(e.target.value); refresh(); });
+  $('#csStep').addEventListener('change', (e) => { S.csStep = Number(e.target.value); });
   $('#vrPreset').addEventListener('change', (e) => applyVrPreset(e.target.value));
   $('#vrLevel').addEventListener('input', (e) => applyVrLevel(Number(e.target.value)));
   $('#series').addEventListener('change', (e) => load(e.target.value));
@@ -1079,8 +1138,9 @@ function bindUi() {
     if (e.target.matches('input, select, textarea') || e.ctrlKey || e.metaKey || e.altKey) return;
     const k = e.key;
     const hovered = S.hoverKind && views[S.hoverKind];
-    if (k === 'Escape') {
-      if (!help.hidden) help.hidden = true;
+    if (k === 'Escape' && !$('#center').hidden) {
+      closeCenter();
+    } else if (k === 'Escape') {
       S.drawing = null;
       S.measuring = null;
       S.angleDraft = null;
@@ -1107,12 +1167,133 @@ function bindUi() {
     } else if (k === 'g') {
       $('#showGuides').click();
     } else if (k === '?') {
-      help.hidden = !help.hidden;
+      openCenter('guide');
     } else {
       const tool = { n: 'navigate', w: 'wl', p: 'pan', z: 'zoom', m: 'measure', l: 'angle', a: 'arch' }[k];
       if (tool) setTool(tool);
     }
   });
+}
+
+// ---------------------------------------------------------------- help centre: guide, privacy, about, terms
+
+const TABS = ['guide', 'privacy', 'about', 'terms'];
+const privacy = { blocked: 0, timer: 0 };
+
+function setHash(tab) {
+  try {
+    const url = new URL(location.href);
+    url.hash = tab ? `#${tab}` : '';
+    history.replaceState(null, '', url);
+  } catch {
+    // some file:// contexts refuse history changes
+  }
+}
+
+function openCenter(tab = 'guide') {
+  if (!TABS.includes(tab)) tab = 'guide';
+  const center = $('#center');
+  center.hidden = false;
+  center.querySelectorAll('[data-tab]').forEach((b) => {
+    const on = b.dataset.tab === tab;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-selected', String(on));
+  });
+  center.querySelectorAll('[data-panel]').forEach((panel) => { panel.hidden = panel.dataset.panel !== tab; });
+  center.querySelector('.center-body').scrollTop = 0;
+  setHash(tab);
+  clearInterval(privacy.timer);
+  if (tab === 'privacy') {
+    renderPrivacy();
+    privacy.timer = setInterval(renderPrivacy, 1000);
+  }
+}
+
+function closeCenter() {
+  $('#center').hidden = true;
+  clearInterval(privacy.timer);
+  setHash('');
+}
+
+function routeHash() {
+  const tab = location.hash.slice(1);
+  if (TABS.includes(tab)) openCenter(tab);
+}
+
+function renderAbout() {
+  $('#aboutVersion').textContent = t('about.version', { v: document.documentElement.dataset.version || 'dev' });
+  $('#aboutCreator').textContent = t('about.creator', { name: CREATOR });
+}
+
+// The live privacy panel reports what the browser itself says about this page.
+function cspActive() {
+  const policy = document.querySelector('meta[http-equiv="Content-Security-Policy"]')?.content || '';
+  return /default-src 'none'/.test(policy) && /connect-src 'none'/.test(policy);
+}
+
+function requestsAfterLoad() {
+  const nav = performance.getEntriesByType('navigation')[0];
+  const loaded = nav ? nav.loadEventEnd || nav.domContentLoadedEventEnd : 0;
+  return performance.getEntriesByType('resource').filter((e) => /^https?:/.test(e.name) && e.startTime > loaded).length;
+}
+
+async function storedItems() {
+  let n = 0;
+  try { n += localStorage.length; } catch { /* blocked */ }
+  try { n += sessionStorage.length; } catch { /* blocked */ }
+  try { if (document.cookie) n += document.cookie.split(';').filter((c) => c.trim()).length; } catch { /* blocked */ }
+  try { if (globalThis.indexedDB?.databases) n += (await indexedDB.databases()).length; } catch { /* blocked */ }
+  try { if (globalThis.caches) n += (await caches.keys()).length; } catch { /* blocked */ }
+  return n;
+}
+
+function setCheck(sel, ok, text) {
+  const row = $(sel);
+  row.classList.toggle('ok', ok);
+  row.classList.toggle('warn', !ok);
+  row.querySelector('.v').textContent = text;
+}
+
+async function renderPrivacy() {
+  if ($('#center').hidden || $('[data-panel="privacy"]').hidden) return;
+  const requests = requestsAfterLoad();
+  setCheck('#chkNetwork', requests === 0, requests ? t('privacy.check.network.some', { n: requests }) : t('privacy.check.network.none'));
+  const csp = cspActive();
+  setCheck('#chkCsp', csp, csp ? t('privacy.check.csp.on', { n: privacy.blocked }) : t('privacy.check.csp.off'));
+  const stored = await storedItems();
+  setCheck('#chkStorage', stored === 0, stored ? t('privacy.check.storage.some', { n: stored }) : t('privacy.check.storage.none'));
+  const mb = S.vol ? Math.round(S.vol.data.byteLength / 1048576) : 0;
+  const name = S.meta?.demo ? t('patient.demo') : S.meta?.patientName || '—';
+  setCheck('#chkMemory', true, S.vol ? t('privacy.check.memory.some', { name, mb }) : t('privacy.check.memory.none'));
+  $('#closeScanBtn').disabled = !S.vol;
+}
+
+// Drop every reference to the scan so the browser can free it, and clear rendered pixels.
+function closeScan() {
+  Object.assign(S, {
+    vol: null, meta: null, lut: null, series: [], arches: [], arch: null, archIdx: -1, canals: [],
+    measures: [], measuring: null, drawing: null, angleDraft: null,
+  });
+  fillSeries();
+  fillArchSelect();
+  KINDS_2D.forEach((k) => {
+    const vp = views[k];
+    vp.setPlane(null);
+    vp.sliceKey = null;
+    vp.img = null;
+    vp.off.width = vp.off.height = 0;
+  });
+  if (vr && !vr.failed) vr.clear();
+  document.body.classList.remove('has-scan');
+  document.title = t('app.name');
+  $('#statusHover').textContent = '';
+  renderPatient();
+  renderStatusWl();
+  setMessage('msg.closed');
+  requestDraw();
+  renderPrivacy();
+  $('#welcomeError').hidden = true;
+  $('#welcome').hidden = false;
 }
 
 // ---------------------------------------------------------------- loading
@@ -1239,18 +1420,28 @@ function setVolume(meta, data) {
   prepare3d();
 }
 
+// Built with text nodes only: values from the scan never reach innerHTML.
 function renderPatient() {
+  const el = $('#patient');
+  el.replaceChildren();
   const m = S.meta;
-  if (!m) { $('#patient').innerHTML = ''; return; }
+  if (!m) return;
   const [nx, ny, nz] = m.dims;
+  const name = document.createElement('strong');
+  name.textContent = m.demo ? t('patient.demo') : m.patientName || '';
+  el.append(name);
   const parts = [
-    `<strong>${escapeHtml(m.demo ? t('patient.demo') : m.patientName || '')}</strong>`,
-    m.birthDate && escapeHtml(t('patient.dob', { v: m.birthDate })),
-    m.studyDate && escapeHtml(t('patient.scan', { v: m.studyDate })),
-    m.model && escapeHtml(m.model),
+    m.birthDate && t('patient.dob', { v: m.birthDate }),
+    m.studyDate && t('patient.scan', { v: m.studyDate }),
+    m.model,
     `${nx}×${ny}×${nz} @ ${+m.spacing[0].toFixed(3)} mm`,
   ].filter(Boolean);
-  $('#patient').innerHTML = parts.join('<span class="sep">·</span>');
+  for (const part of parts) {
+    const sep = document.createElement('span');
+    sep.className = 'sep';
+    sep.textContent = '·';
+    el.append(sep, document.createTextNode(part));
+  }
 }
 
 function prepare3d() {
@@ -1263,10 +1454,6 @@ function prepare3d() {
     applyVrPreset($('#vrPreset').value);
     window.__viewerReady = true;
   }, 30);
-}
-
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 }
 
 function start() {
@@ -1288,12 +1475,20 @@ function start() {
     vrEl.querySelector('.canvas-wrap').insertAdjacentHTML('beforeend', '<div class="empty"></div>');
   }
 
+  for (const key of LEGACY_STORAGE_KEYS) {
+    try { localStorage.removeItem(key); } catch { /* storage unavailable */ }
+  }
+  document.addEventListener('securitypolicyviolation', () => { privacy.blocked++; renderPrivacy(); });
+  const langSelect = $('#lang');
+  for (const l of LANGUAGES) langSelect.append(new Option(l.name, l.id));
+
   bindUi();
   applyLanguage(detectLanguage());
   setTool('navigate');
 
   if (new URLSearchParams(location.search).has('demo')) openDemo();
   else $('#welcome').hidden = false;
+  routeHash();
 }
 
 start();

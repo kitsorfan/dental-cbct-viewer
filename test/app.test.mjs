@@ -1,18 +1,27 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import vm from 'node:vm';
-import { STRINGS } from '../src/i18n.js';
+import { STRINGS, LANGUAGES } from '../src/i18n.js';
 import { buildPdf } from '../src/pdf.js';
 import { makePhantom } from '../src/phantom.js';
 import { build } from '../scripts/build.mjs';
 
 const src = (f) => fs.readFileSync(new URL(`../src/${f}`, import.meta.url), 'utf8');
 
-test('English and Greek define the same strings and placeholders', () => {
-  assert.deepEqual(Object.keys(STRINGS.el).sort(), Object.keys(STRINGS.en).sort());
+test('every language defines the same strings, placeholders and list items', () => {
+  assert.deepEqual(LANGUAGES.map((l) => l.id).sort(), Object.keys(STRINGS).sort());
   const vars = (s) => [...s.matchAll(/\{(\w+)\}/g)].map((m) => m[1]).sort().join();
-  for (const key of Object.keys(STRINGS.en)) assert.equal(vars(STRINGS.el[key]), vars(STRINGS.en[key]), key);
+  const items = (s) => (s.match(/<li>/g) || []).length;
+  const keys = Object.keys(STRINGS.en).sort();
+  for (const lang of Object.keys(STRINGS)) {
+    assert.deepEqual(Object.keys(STRINGS[lang]).sort(), keys, `${lang} keys`);
+    for (const key of keys) {
+      assert.equal(vars(STRINGS[lang][key]), vars(STRINGS.en[key]), `${lang} ${key} placeholders`);
+      assert.equal(items(STRINGS[lang][key]), items(STRINGS.en[key]), `${lang} ${key} list items`);
+    }
+  }
 });
 
 test('every string key used in the code and markup exists', () => {
@@ -21,9 +30,14 @@ test('every string key used in the code and markup exists', () => {
   const used = new Set([
     ...[...code.matchAll(/\bt\('([\w.]+)'/g)].map((m) => m[1]),
     ...[...code.matchAll(/setMessage\('([\w.]+)'/g)].map((m) => m[1]),
-    ...[...html.matchAll(/data-i18n(?:-title|-html)?="([\w.]+)"/g)].map((m) => m[1]),
+    ...[...html.matchAll(/data-i18n(?:-title|-html|-aria)?="([\w.]+)"/g)].map((m) => m[1]),
   ]);
   for (const key of used) assert.ok(key in STRINGS.en, `missing string: ${key}`);
+});
+
+test('nothing is written to browser storage', () => {
+  const code = fs.readdirSync(new URL('../src/', import.meta.url)).filter((f) => f.endsWith('.js')).map(src).join('\n');
+  assert.doesNotMatch(code, /localStorage\.setItem|sessionStorage\.setItem|document\.cookie\s*=|indexedDB\.open|caches\.open/);
 });
 
 test('the PDF writer produces a valid cross-reference table', async () => {
@@ -49,12 +63,20 @@ test('the demo phantom has teeth, a metal crown and an analysis', () => {
   assert.ok(meta.demo);
 });
 
-test('the single-file build has no module syntax left and compiles', () => {
+test('the single-file build compiles and only its own script may run', () => {
   const { out } = build();
   const html = fs.readFileSync(out, 'utf8');
   assert.match(html, /data-build="bundle"/);
   assert.doesNotMatch(html, /src="src\//);
-  const script = html.match(/<script>\n([\s\S]*)<\/script>/)[1];
+  const script = html.match(/<script>([\s\S]*)<\/script>/)[1];
   assert.doesNotMatch(script, /^\s*(import|export)\s/m);
   assert.doesNotThrow(() => new vm.Script(script));
+
+  const csp = html.match(/http-equiv="Content-Security-Policy" content="([^"]+)"/)[1];
+  const hash = crypto.createHash('sha256').update(script, 'utf8').digest('base64');
+  assert.ok(csp.includes(`script-src 'sha256-${hash}'`), 'script hash matches the policy');
+  for (const rule of ["default-src 'none'", "connect-src 'none'", "form-action 'none'", "base-uri 'none'"]) assert.ok(csp.includes(rule), rule);
+  assert.doesNotMatch(csp, /'self'|https?:/);
+  const { version } = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+  assert.ok(html.includes(`data-version="${version}"`), 'version stamped');
 });

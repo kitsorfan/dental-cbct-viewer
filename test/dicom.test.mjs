@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { scanEntries, loadSeries, DicomError } from '../src/dicom.js';
+import { scanEntries, loadSeries, parseAnalysis, DicomError } from '../src/dicom.js';
 import { writeDicom, ctSlice, fileEntry } from './dicom-writer.mjs';
 
 const slices = (zs, opts = {}) => zs.map((z, i) => fileEntry(
@@ -105,4 +105,33 @@ test('attaches the analysis whose Reference matches the series', async () => {
 test('rejects folders without images', async () => {
   const entries = [fileEntry(new TextEncoder().encode('hello'), 'notes.txt')];
   await assert.rejects(scanEntries(entries), (err) => err.code === 'noImages');
+});
+
+test('rejects implausible image sizes before allocating anything', async () => {
+  const extra = [[0x00280010, 'US', 60000], [0x00280011, 'US', 60000]];
+  const entry = fileEntry(writeDicom(ctSlice({ extra })), 'huge.dcm');
+  await assert.rejects(scanEntries([entry]), (err) => err.code === 'dims');
+});
+
+test('rejects absurdly deep nesting', async () => {
+  let item = [[0x00091011, 'LO', 'x']];
+  for (let i = 0; i < 40; i++) item = [[0x00091010, 'SQ', [item]]];
+  const entry = fileEntry(writeDicom(ctSlice({ extra: item })), 'deep.dcm');
+  await assert.rejects(scanEntries([entry]), (err) => err.code === 'invalid');
+});
+
+test('reports garbage files as damaged rather than crashing', async () => {
+  const bytes = new Uint8Array(400);
+  bytes.set(new TextEncoder().encode('DICM'), 128);
+  for (let i = 132; i < 400; i++) bytes[i] = (i * 37) & 0xff;
+  await assert.rejects(scanEntries([fileEntry(bytes, 'noise.dcm')]), (err) => err instanceof DicomError);
+});
+
+test('refuses to open an unreasonable number of files', async () => {
+  const entries = Array.from({ length: 20001 }, (_, i) => ({ file: new File([], `f${i}`), path: `f${i}` }));
+  await assert.rejects(scanEntries(entries), (err) => err.code === 'tooMany');
+});
+
+test('ignores analysis files that declare a DTD or entities', () => {
+  assert.equal(parseAnalysis('<!DOCTYPE t [<!ENTITY a "b">]><trophy type="itoothcontext">&a;</trophy>'), null);
 });

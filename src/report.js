@@ -201,40 +201,47 @@ export async function createReport(r) {
     pages.push(canvas);
   }
 
-  // Page 2: serial cross-sections with a numbered panoramic.
+  // Serial cross-sections at a fixed interval along the whole arch, as many pages as needed.
+  // Each page starts with a small panoramic marking the sections it holds.
   if (r.cross) {
-    const { canvas, ctx } = newPage();
-    let y = header(ctx, r, r.cross.title);
-    ctx.font = font(8.5);
-    ctx.fillStyle = MUTED;
-    ctx.fillText(r.cross.subtitle, M, y + 3);
-    const ph = Math.min(52, CONTENT_W / r.pano.aspect);
-    const pw = ph * r.pano.aspect;
-    imageBox(ctx, r.pano.render(pw, ph, { ticks: r.cross.items }), M + (CONTENT_W - pw) / 2, y + 5, pw, ph);
-    y += ph + 12;
-    const cols = 4;
-    const rows = Math.ceil(r.cross.items.length / cols);
-    const gap = 4, label = 6;
-    let cw = (CONTENT_W - (cols - 1) * gap) / cols;
-    let ch = cw / r.cross.aspect;
-    const avail = FOOTER_Y - 4 - y;
-    if (rows * (ch + label) + (rows - 1) * gap > avail) {
-      ch = (avail - (rows - 1) * gap) / rows - label;
-      cw = ch * r.cross.aspect;
-    }
-    const gridW = cols * cw + (cols - 1) * gap;
-    r.cross.items.forEach((item, i) => {
-      const x = M + (CONTENT_W - gridW) / 2 + (i % cols) * (cw + gap);
-      const yy = y + Math.floor(i / cols) * (ch + label + gap);
-      ctx.font = font(8.5, 700);
-      ctx.fillStyle = INK;
-      ctx.fillText(`${item.label}`, x, yy + 3);
-      ctx.font = font(7.5);
+    const items = r.cross.items;
+    const cols = 6, gap = 3, label = 4.6;
+    const cw = (CONTENT_W - (cols - 1) * gap) / cols;
+    const ch = cw / r.cross.aspect;
+    const stripH = Math.min(30, CONTENT_W / r.pano.aspect);
+    const stripW = stripH * r.pano.aspect;
+    let start = 0;
+    while (start < items.length) {
+      const { canvas, ctx } = newPage();
+      let y = header(ctx, r, r.cross.title);
+      const top = y + 6 + stripH + 5;
+      const rows = Math.max(1, Math.floor((FOOTER_Y - 3 - top + gap) / (ch + label + gap)));
+      const pageItems = items.slice(start, start + rows * cols);
+      ctx.font = font(8);
       ctx.fillStyle = MUTED;
-      ctx.fillText(item.detail, x + ctx.measureText(`${item.label}  `).width + 1.5, yy + 3);
-      imageBox(ctx, r.cross.render(i, cw, ch), x, yy + label - 1, cw, ch);
-    });
-    pages.push(canvas);
+      ctx.fillText(fitText(ctx, r.cross.subtitle, CONTENT_W - 45), M, y + 2.5);
+      ctx.textAlign = 'right';
+      ctx.font = font(8, 700);
+      ctx.fillStyle = INK;
+      ctx.fillText(r.cross.range(start + 1, start + pageItems.length, items.length), PAGE[0] - M, y + 2.5);
+      ctx.textAlign = 'left';
+      const strip = r.pano.render(stripW, stripH, { ticks: pageItems, compact: true });
+      imageBox(ctx, strip, M + (CONTENT_W - stripW) / 2, y + 5, stripW, stripH);
+      pageItems.forEach((item, i) => {
+        const x = M + (i % cols) * (cw + gap);
+        const yy = top + Math.floor(i / cols) * (ch + label + gap);
+        ctx.font = font(7.5, 700);
+        ctx.fillStyle = INK;
+        ctx.fillText(String(item.label), x, yy + 2.6);
+        const w = ctx.measureText(`${item.label} `).width;
+        ctx.font = font(7);
+        ctx.fillStyle = MUTED;
+        ctx.fillText(item.detail, x + w + 1, yy + 2.6);
+        imageBox(ctx, r.cross.render(item, cw, ch), x, yy + label - 0.8, cw, ch);
+      });
+      pages.push(canvas);
+      start += pageItems.length;
+    }
   }
 
   // Page 3+: current views and the measurement table.

@@ -1,5 +1,6 @@
 // Bundle the app into one self-contained dist/index.html (works from file:// and GitHub Pages).
 // The ES modules are wrapped in function scopes in dependency order; no tooling needed.
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -30,18 +31,27 @@ export function build() {
   const missing = fs.readdirSync(src).filter((f) => f.endsWith('.js') && !MODULES.includes(f));
   if (missing.length) throw new Error(`Add to MODULES in build order: ${missing.join(', ')}`);
 
-  const css = fs.readFileSync(path.join(src, 'style.css'), 'utf8');
-  const js = MODULES.map(bundleModule).join('\n');
+  // Line endings are normalised so the script hash matches what the browser parses.
+  const lf = (s) => s.replace(/\r\n?/g, '\n');
+  const css = lf(fs.readFileSync(path.join(src, 'style.css'), 'utf8'));
+  const js = lf(MODULES.map(bundleModule).join('\n'));
   if (/<\/script/i.test(js) || /<\/style/i.test(css)) throw new Error('closing tag inside inlined source');
+  const script = `\n(() => {\n'use strict';\n${js}})();\n`;
+  const hash = crypto.createHash('sha256').update(script, 'utf8').digest('base64');
+  const { version } = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
 
-  let html = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
+  let html = lf(fs.readFileSync(path.join(root, 'index.html'), 'utf8'));
   const replace = (from, to) => {
     if (!html.includes(from)) throw new Error(`index.html is missing: ${from}`);
     html = html.replace(from, () => to);
   };
   replace('<link rel="stylesheet" href="src/style.css">', `<style>\n${css}</style>`);
-  replace('<script type="module" src="src/app.js"></script>', `<script>\n(() => {\n'use strict';\n${js}})();\n</script>`);
+  replace('<script type="module" src="src/app.js"></script>', `<script>${script}</script>`);
   replace('data-build="dev"', 'data-build="bundle"');
+  replace('data-version="dev"', `data-version="${version}"`);
+  // Only this exact inline script may run; styles stay inline-only.
+  replace("script-src 'self'", `script-src 'sha256-${hash}'`);
+  replace("style-src 'self' 'unsafe-inline'", "style-src 'unsafe-inline'");
 
   fs.mkdirSync(dist, { recursive: true });
   const out = path.join(dist, 'index.html');

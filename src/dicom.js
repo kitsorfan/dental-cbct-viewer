@@ -19,7 +19,18 @@ const LONG_VRS = new Set(['OB', 'OD', 'OF', 'OL', 'OV', 'OW', 'SQ', 'SV', 'UC', 
 const HEADER_BYTES = 64 * 1024;
 const IMPLICIT_LE = '1.2.840.10008.1.2';
 const EXPLICIT_LE = '1.2.840.10008.1.2.1';
-const MAX_BYTES = 1.6e9;
+
+// Limits that keep hostile or damaged input from hanging or exhausting the browser.
+export const LIMITS = {
+  volumeBytes: 1.6e9,
+  files: 20000,
+  dimension: 4096,
+  frames: 10000,
+  nesting: 24,
+  xmlBytes: 5e6,
+  curvePoints: 2000,
+  curves: 50,
+};
 
 const WANTED = {
   0x00080005: ['charset', 'CS'],
@@ -160,7 +171,9 @@ export function parseHeader(buffer) {
     return p;
   };
 
+  let depth = 0;
   const sequence = (p, length, ctx) => {
+    if (++depth > LIMITS.nesting) throw new DicomError('invalid');
     const end = length === UNDEF ? Infinity : p + length;
     let index = 0;
     while (p < end) {
@@ -180,11 +193,17 @@ export function parseHeader(buffer) {
       }
       index++;
     }
+    depth--;
     return p;
   };
 
   walk(preamble ? 132 : 0, Infinity, { top: true });
   for (const key of Object.keys(nested)) if (!(key in out)) out[key] = nested[key];
+
+  const frames = num(out.frames, 1);
+  if (out.rows > LIMITS.dimension || out.cols > LIMITS.dimension || frames > LIMITS.frames || frames < 1) {
+    throw new DicomError('dims', `${out.cols}×${out.rows}×${frames}`);
+  }
   return out;
 }
 
@@ -193,7 +212,8 @@ async function readHeader(file) {
     try {
       return parseHeader(await blob.arrayBuffer());
     } catch (err) {
-      if (!(err instanceof NeedMore)) throw err;
+      if (err instanceof DicomError) throw err;
+      if (!(err instanceof NeedMore)) throw new DicomError('invalid'); // malformed lengths or offsets
       if (last) throw new DicomError('noPixels');
       return null;
     }
@@ -238,6 +258,7 @@ async function hasDicomMagic(file) {
 
 // entries: [{ file, path }] with '/'-separated relative paths. Returns series, largest first.
 export async function scanEntries(entries, onProgress, parseXml = parseAnalysis) {
+  if (entries.length > LIMITS.files) throw new DicomError('tooMany', String(entries.length));
   const lower = (e) => e.path.toLowerCase();
   let candidates = entries.filter((e) => lower(e).endsWith('.dcm') || lower(e).endsWith('.dicom'));
   if (!candidates.length) {
@@ -266,11 +287,15 @@ export async function scanEntries(entries, onProgress, parseXml = parseAnalysis)
   });
 
   const analyses = [];
-  for (const e of entries.filter((x) => lower(x).endsWith('.xml') && x.file.size < 5e6)) {
+  for (const e of entries.filter((x) => lower(x).endsWith('.xml') && x.file.size < LIMITS.xmlBytes)) {
     const text = await e.file.text();
     if (!text.includes('itoothcontext')) continue;
-    const parsed = parseXml(text);
-    if (parsed) analyses.push({ path: e.path, ...parsed });
+    try {
+      const parsed = parseXml(text);
+      if (parsed) analyses.push({ path: e.path, ...parsed });
+    } catch {
+      // an unreadable analysis only means no arches or canals
+    }
   }
 
   const series = [...groups.values()].map((g) => {
@@ -347,7 +372,7 @@ export async function loadSeries(series, onProgress) {
   frames.sort((x, y) => x.pos - y.pos);
 
   const nz = frames.length;
-  if (nxy * nz * 2 > MAX_BYTES) throw new DicomError('tooLarge', `${Math.round((nxy * nz * 2) / 1048576)} MB`);
+  if (nxy * nz * 2 > LIMITS.volumeBytes) throw new DicomError('tooLarge', `${Math.round((nxy * nz * 2) / 1048576)} MB`);
   let data;
   try {
     data = new Uint16Array(nxy * nz);
@@ -372,8 +397,9 @@ export async function loadSeries(series, onProgress) {
   const diffs = [];
   for (let i = 1; i < nz; i++) diffs.push(frames[i].pos - frames[i - 1].pos);
   diffs.sort((x, y) => x - y);
-  const dz = diffs.length ? Math.abs(diffs[diffs.length >> 1]) : num(first.sliceThickness, 1);
-  const spacing = nums(first.pixelSpacing);
+  const sane = (v) => (Number.isFinite(v) && v > 0.005 && v < 20 ? v : 1);
+  const dz = sane(diffs.length ? Math.abs(diffs[diffs.length >> 1]) : num(first.sliceThickness, 1));
+  const spacing = nums(first.pixelSpacing).map(sane);
   const slope = num(first.slope, 1);
   let intercept = num(first.intercept, 0);
   if (signed) intercept -= 32768 * slope;
@@ -382,7 +408,7 @@ export async function loadSeries(series, onProgress) {
 
   const meta = {
     dims: [cols, rows, nz],
-    spacing: [spacing[1] ?? 1, spacing[0] ?? 1, dz || 1],
+    spacing: [spacing[1] ?? 1, spacing[0] ?? 1, dz],
     slope,
     intercept,
     window: wc !== undefined && ww !== undefined ? { center: wc, width: ww } : null,
@@ -401,30 +427,37 @@ export async function loadSeries(series, onProgress) {
   return { meta, data };
 }
 
-// CS 3D Imaging context file: arches, nerve canals and display defaults.
+// CS 3D Imaging context file: arches, nerve canals and display defaults. Untrusted input:
+// no DTDs or entities, and every coordinate must be a finite, bounded number.
 export function parseAnalysis(text) {
+  if (/<!DOCTYPE|<!ENTITY/i.test(text)) return null;
   const doc = new DOMParser().parseFromString(text.replace(/\0+/g, '').trim(), 'application/xml');
   if (doc.getElementsByTagName('parsererror').length) return null;
   const q = (sel, root = doc) => root.querySelector(sel);
-  const points = (el) => [...el.children].filter((c) => c.tagName === 'Point')
-    .map((p) => ['x', 'y', 'z'].map((k) => Number(p.getAttribute(k))));
+  const coord = (v) => { const n = Number(v); return Number.isFinite(n) && Math.abs(n) < 1e5 ? n : NaN; };
+  const points = (el) => {
+    const pts = [...el.children].filter((c) => c.tagName === 'Point').slice(0, LIMITS.curvePoints)
+      .map((p) => ['x', 'y', 'z'].map((k) => coord(p.getAttribute(k))));
+    return pts.every((p) => p.every(Number.isFinite)) ? pts : [];
+  };
+  const label = (v) => String(v ?? '').slice(0, 120);
 
   const result = {
-    name: q('IToothContext > Header > Name')?.textContent || '',
-    reference: q('IToothContext > Header > Reference')?.textContent?.trim() || '',
+    name: label(q('IToothContext > Header > Name')?.textContent),
+    reference: label(q('IToothContext > Header > Reference')?.textContent?.trim()),
     arches: [], canals: [], lut: null, ortho: null,
   };
 
   const lut = q('VolumeContext > Lut2D');
-  if (lut?.getAttribute('windowlevel')) {
-    result.lut = { center: Number(lut.getAttribute('windowlevel')), width: Number(lut.getAttribute('windowwidth')) };
-  }
+  const center = coord(lut?.getAttribute('windowlevel')), width = coord(lut?.getAttribute('windowwidth'));
+  if (Number.isFinite(center) && width > 0) result.lut = { center, width };
   const ortho = q('VolumeContext > OrthoPositions');
-  if (ortho) result.ortho = ['x', 'y', 'z'].map((k) => Number(ortho.getAttribute(k) || 0));
+  const op = ortho ? ['x', 'y', 'z'].map((k) => coord(ortho.getAttribute(k) || 0)) : null;
+  if (op && op.every(Number.isFinite)) result.ortho = op;
 
   const names = {};
   doc.querySelectorAll('GraphicObjects > MultiResamples > Resample').forEach((r) => {
-    names[r.getAttribute('resampleUid')] = r.getAttribute('name') || '';
+    names[r.getAttribute('resampleUid')] = label(r.getAttribute('name'));
   });
 
   doc.querySelectorAll('MultiResamplesTools > ResamplesTool').forEach((tool) => {
@@ -433,19 +466,22 @@ export function parseAnalysis(text) {
       if (!surface) return;
       const pts = points(surface);
       if (pts.length < 2) return;
-      const id = res.getAttribute('id');
-      const type = (tool.getAttribute('type') || '').replace(/^e_/, '');
+      if (result.arches.length >= LIMITS.curves) return;
+      const id = label(res.getAttribute('id'));
+      const type = label(tool.getAttribute('type')).replace(/^e_/, '');
       result.arches.push({ id, type, name: names[id] || type, points: pts });
     });
   });
 
   doc.querySelectorAll('GraphicObjects > Canals > Canal').forEach((canal) => {
     const pts = points(canal);
-    if (pts.length < 2) return;
+    if (pts.length < 2 || result.canals.length >= LIMITS.curves) return;
+    const radius = coord(canal.getAttribute('radius') || 1);
+    const channel = (k) => { const v = coord(canal.getAttribute(k) ?? 1); return Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 1; };
     result.canals.push({
-      name: canal.getAttribute('name') || 'Canal',
-      radius: Number(canal.getAttribute('radius') || 1),
-      color: ['R', 'G', 'B'].map((k) => Number(canal.getAttribute(k) ?? 1)),
+      name: label(canal.getAttribute('name') || 'Canal'),
+      radius: radius > 0 && radius < 20 ? radius : 1.25,
+      color: ['R', 'G', 'B'].map(channel),
       points: pts,
     });
   });
