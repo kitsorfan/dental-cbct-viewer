@@ -1,0 +1,95 @@
+// Builds small DICOM files in memory so tests never need real patient scans.
+
+const LONG_VRS = new Set(['OB', 'OD', 'OF', 'OL', 'OV', 'OW', 'SQ', 'SV', 'UC', 'UN', 'UR', 'UT', 'UV']);
+const UNDEF = 0xffffffff;
+const utf8 = new TextEncoder();
+
+function concat(parts) {
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let o = 0;
+  for (const p of parts) { out.set(p, o); o += p.length; }
+  return out;
+}
+
+function u16(v) { const b = new Uint8Array(2); new DataView(b.buffer).setUint16(0, v, true); return b; }
+function u32(v) { const b = new Uint8Array(4); new DataView(b.buffer).setUint32(0, v, true); return b; }
+function tagBytes(tag) { return concat([u16(tag >>> 16), u16(tag & 0xffff)]); }
+
+function valueBytes(vr, value) {
+  if (value instanceof Uint8Array) return value;
+  if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  if (vr === 'US') return u16(value);
+  let b = utf8.encode(String(value));
+  if (b.length % 2) b = concat([b, new Uint8Array([vr === 'UI' ? 0 : 0x20])]);
+  return b;
+}
+
+// elements: [tag, vr, value] where value is a string, number (US), typed array, or for SQ
+// an array of items (each an element list). { undefinedLength: true } marks encapsulated data.
+function encode(elements, explicit) {
+  const parts = [];
+  for (const [tag, vr, value, opts = {}] of elements) {
+    const group = tag >>> 16;
+    const asExplicit = explicit || group === 0x0002;
+    let body;
+    let length;
+    if (vr === 'SQ') {
+      const items = value.map((item) => concat([tagBytes(0xfffee000), u32(UNDEF), encode(item, explicit), tagBytes(0xfffee00d), u32(0)]));
+      body = concat([...items, tagBytes(0xfffee0dd), u32(0)]);
+      length = UNDEF;
+    } else if (opts.undefinedLength) {
+      body = concat([tagBytes(0xfffee000), u32(0), tagBytes(0xfffee000), u32(4), new Uint8Array(4), tagBytes(0xfffee0dd), u32(0)]);
+      length = UNDEF;
+    } else {
+      body = valueBytes(vr, value);
+      length = body.length;
+    }
+    if (asExplicit) {
+      const vrBytes = utf8.encode(vr);
+      parts.push(tagBytes(tag), vrBytes, LONG_VRS.has(vr) ? concat([u16(0), u32(length)]) : u16(length));
+    } else {
+      parts.push(tagBytes(tag), u32(length));
+    }
+    parts.push(body);
+  }
+  return concat(parts);
+}
+
+export function writeDicom(elements, { transfer = '1.2.840.10008.1.2.1', preamble = true } = {}) {
+  const explicit = transfer !== '1.2.840.10008.1.2';
+  const meta = encode([[0x00020010, 'UI', transfer]], true);
+  const dataset = encode(elements.slice().sort((a, b) => (a[0] >>> 0) - (b[0] >>> 0)), explicit);
+  const head = preamble ? concat([new Uint8Array(128), utf8.encode('DICM')]) : new Uint8Array(0);
+  return concat([head, meta, dataset]);
+}
+
+// A typical single-frame CT slice; override or add elements through `extra`.
+export function ctSlice({ rows = 4, cols = 3, z = 0, instance = 1, series = '1.2.3', pixels, signed = false, extra = [] } = {}) {
+  const n = rows * cols;
+  const px = pixels ?? (signed ? new Int16Array(n) : new Uint16Array(n)).map((_, i) => i + z * 100);
+  const base = [
+    [0x00080005, 'CS', 'ISO_IR 192'],
+    [0x00080020, 'DA', '20261012'],
+    [0x00080060, 'CS', 'CT'],
+    [0x00100010, 'PN', 'DOE^JANE'],
+    [0x0020000e, 'UI', series],
+    [0x00200013, 'IS', String(instance)],
+    [0x00200032, 'DS', `-10\\-10\\${z}`],
+    [0x00200037, 'DS', '1\\0\\0\\0\\1\\0'],
+    [0x00280002, 'US', 1],
+    [0x00280010, 'US', rows],
+    [0x00280011, 'US', cols],
+    [0x00280030, 'DS', '0.5\\0.4'],
+    [0x00280100, 'US', 16],
+    [0x00280103, 'US', signed ? 1 : 0],
+    [0x00281052, 'DS', '-1000'],
+    [0x00281053, 'DS', '1'],
+    [0x7fe00010, 'OW', px],
+  ];
+  const tags = new Set(extra.map((e) => e[0]));
+  return [...base.filter((e) => !tags.has(e[0])), ...extra];
+}
+
+export function fileEntry(bytes, path) {
+  return { file: new File([bytes], path.split('/').pop()), path };
+}

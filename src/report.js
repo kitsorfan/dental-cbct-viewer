@@ -1,0 +1,284 @@
+// A4 PDF report composed on canvases (drawn in millimetres) and written with pdf.js.
+import { buildPdf } from './pdf.js';
+import { drawLogo, ACCENT } from './brand.js';
+
+const DPI = 180;
+const PX = DPI / 25.4;
+// Images are rendered at CSS-pixel sizes (96 per inch) with this device ratio to reach DPI.
+export const CSS_PER_MM = 96 / 25.4;
+export const PIXEL_RATIO = DPI / 96;
+const PAGE = [210, 297];
+const M = 14;
+const CONTENT_W = PAGE[0] - 2 * M;
+const FOOTER_Y = PAGE[1] - M - 7;
+const FONT = '"Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif';
+const INK = '#16202a';
+const MUTED = '#5b6876';
+const RULE = '#d5dbe1';
+const pt = (n) => n * 0.3528;
+
+function font(size, weight = 400) {
+  return `${weight} ${pt(size)}px ${FONT}`;
+}
+
+function newPage() {
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(PAGE[0] * PX);
+  canvas.height = Math.round(PAGE[1] * PX);
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.scale(PX, PX);
+  ctx.textBaseline = 'alphabetic';
+  return { canvas, ctx };
+}
+
+function wrap(ctx, text, maxWidth) {
+  const lines = [];
+  let line = '';
+  for (const word of String(text).split(/\s+/)) {
+    const next = line ? `${line} ${word}` : word;
+    if (ctx.measureText(next).width > maxWidth && line) {
+      lines.push(line);
+      line = word;
+    } else line = next;
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+function fitText(ctx, text, maxWidth) {
+  let s = String(text);
+  if (ctx.measureText(s).width <= maxWidth) return s;
+  while (s.length > 1 && ctx.measureText(`${s}…`).width > maxWidth) s = s.slice(0, -1);
+  return `${s}…`;
+}
+
+function header(ctx, r, title) {
+  drawLogo(ctx, M, M - 1, 10);
+  ctx.fillStyle = ACCENT;
+  ctx.font = font(8.5, 600);
+  ctx.fillText(r.appName, M + 13, M + 2.6);
+  ctx.fillStyle = INK;
+  ctx.font = font(15, 700);
+  ctx.fillText(title, M + 13, M + 9);
+  ctx.textAlign = 'right';
+  ctx.font = font(11, 700);
+  ctx.fillText(fitText(ctx, r.patient, 80), PAGE[0] - M, M + 3.2);
+  ctx.font = font(8);
+  ctx.fillStyle = MUTED;
+  ctx.fillText(r.created, PAGE[0] - M, M + 8.6);
+  ctx.textAlign = 'left';
+  ctx.fillStyle = ACCENT;
+  ctx.fillRect(M, M + 12, CONTENT_W, 0.6);
+  let y = M + 18;
+  if (r.banner) {
+    ctx.fillStyle = '#e6f8f6';
+    ctx.fillRect(M, y - 4, CONTENT_W, 7);
+    ctx.fillStyle = '#0f6f66';
+    ctx.font = font(8.5, 600);
+    ctx.fillText(r.banner, M + 3, y + 0.8);
+    y += 8;
+  }
+  return y;
+}
+
+function footer(ctx, r, n, total) {
+  ctx.fillStyle = RULE;
+  ctx.fillRect(M, FOOTER_Y, CONTENT_W, 0.3);
+  ctx.font = font(7);
+  ctx.fillStyle = MUTED;
+  const lines = wrap(ctx, r.disclaimer, CONTENT_W - 30);
+  lines.slice(0, 2).forEach((line, i) => ctx.fillText(line, M, FOOTER_Y + 3.6 + i * 3));
+  ctx.textAlign = 'right';
+  ctx.fillText(r.pageLabel(n, total), PAGE[0] - M, FOOTER_Y + 3.6);
+  ctx.textAlign = 'left';
+}
+
+function caption(ctx, text, x, y, sub) {
+  ctx.fillStyle = INK;
+  ctx.font = font(9.5, 700);
+  ctx.fillText(text, x, y);
+  if (sub) {
+    const w = ctx.measureText(text).width;
+    ctx.font = font(8);
+    ctx.fillStyle = MUTED;
+    ctx.fillText(sub, x + w + 3, y);
+  }
+}
+
+function imageBox(ctx, source, x, y, w, h) {
+  ctx.fillStyle = '#000';
+  ctx.fillRect(x, y, w, h);
+  if (source) ctx.drawImage(source, x, y, w, h);
+  ctx.strokeStyle = '#000';
+  ctx.lineWidth = 0.25;
+  ctx.strokeRect(x, y, w, h);
+}
+
+function infoGrid(ctx, rows, y) {
+  const colW = CONTENT_W / 2;
+  const perCol = Math.ceil(rows.length / 2);
+  rows.forEach(([key, value], i) => {
+    const col = Math.floor(i / perCol);
+    const x = M + col * colW;
+    const yy = y + (i % perCol) * 5.6;
+    ctx.font = font(8);
+    ctx.fillStyle = MUTED;
+    ctx.fillText(key, x, yy);
+    ctx.font = font(9.5, 600);
+    ctx.fillStyle = INK;
+    ctx.fillText(fitText(ctx, value || '—', colW - 34), x + 30, yy);
+  });
+  return y + perCol * 5.6;
+}
+
+function table(ctx, rows, cols, x, y, maxY) {
+  const rowH = 5.4;
+  const widths = cols.map((c) => c.width);
+  const drawRow = (cells, yy, head) => {
+    ctx.font = head ? font(8, 700) : font(9);
+    ctx.fillStyle = head ? MUTED : INK;
+    let xx = x;
+    cells.forEach((cell, i) => {
+      ctx.textAlign = cols[i].align || 'left';
+      const tx = cols[i].align === 'right' ? xx + widths[i] - 2 : xx + 2;
+      ctx.fillText(fitText(ctx, cell, widths[i] - 4), tx, yy);
+      xx += widths[i];
+    });
+    ctx.textAlign = 'left';
+  };
+  drawRow(cols.map((c) => c.label), y, true);
+  ctx.fillStyle = RULE;
+  ctx.fillRect(x, y + 1.6, widths.reduce((a, b) => a + b, 0), 0.3);
+  let yy = y + rowH + 0.8;
+  let i = 0;
+  for (; i < rows.length && yy < maxY; i++, yy += rowH) {
+    if (i % 2) {
+      ctx.fillStyle = '#f3f6f8';
+      ctx.fillRect(x, yy - 3.8, widths.reduce((a, b) => a + b, 0), rowH);
+    }
+    drawRow(rows[i], yy, false);
+  }
+  return i;
+}
+
+const toJpeg = (canvas) => new Promise((resolve, reject) => {
+  canvas.toBlob(async (blob) => {
+    if (!blob) { reject(new Error('Could not encode the report page')); return; }
+    resolve({ jpeg: new Uint8Array(await blob.arrayBuffer()), width: canvas.width, height: canvas.height });
+  }, 'image/jpeg', 0.9);
+});
+
+// r: everything the report needs, gathered by the app (see app.js createPdfReport).
+export async function createReport(r) {
+  const pages = [];
+  const mm = (w, h) => [w, h];
+
+  // Page 1: overview.
+  {
+    const { canvas, ctx } = newPage();
+    let y = header(ctx, r, r.titles.overview);
+    y = infoGrid(ctx, r.info, y + 2) + 3;
+    if (r.pano) {
+      const h = Math.min(84, CONTENT_W / r.pano.aspect);
+      const w = Math.min(CONTENT_W, h * r.pano.aspect);
+      caption(ctx, r.pano.title, M, y + 3, r.pano.subtitle);
+      imageBox(ctx, r.pano.render(...mm(w, h)), M + (CONTENT_W - w) / 2, y + 5, w, h);
+      y += h + 12;
+    }
+    const tiles = r.overviewTiles;
+    const gap = 6;
+    const w = (CONTENT_W - gap) / 2;
+    const rows = Math.ceil(tiles.length / 2);
+    const h = Math.min(w, (FOOTER_Y - 6 - y - rows * 7) / rows);
+    tiles.forEach((tile, i) => {
+      const x = M + (i % 2) * (w + gap);
+      const yy = y + Math.floor(i / 2) * (h + 9);
+      caption(ctx, tile.title, x, yy + 3, tile.subtitle);
+      imageBox(ctx, tile.render(w, h), x, yy + 5, w, h);
+    });
+    pages.push(canvas);
+  }
+
+  // Page 2: serial cross-sections with a numbered panoramic.
+  if (r.cross) {
+    const { canvas, ctx } = newPage();
+    let y = header(ctx, r, r.cross.title);
+    ctx.font = font(8.5);
+    ctx.fillStyle = MUTED;
+    ctx.fillText(r.cross.subtitle, M, y + 3);
+    const ph = Math.min(52, CONTENT_W / r.pano.aspect);
+    const pw = ph * r.pano.aspect;
+    imageBox(ctx, r.pano.render(pw, ph, { ticks: r.cross.items }), M + (CONTENT_W - pw) / 2, y + 5, pw, ph);
+    y += ph + 12;
+    const cols = 4;
+    const rows = Math.ceil(r.cross.items.length / cols);
+    const gap = 4, label = 6;
+    let cw = (CONTENT_W - (cols - 1) * gap) / cols;
+    let ch = cw / r.cross.aspect;
+    const avail = FOOTER_Y - 4 - y;
+    if (rows * (ch + label) + (rows - 1) * gap > avail) {
+      ch = (avail - (rows - 1) * gap) / rows - label;
+      cw = ch * r.cross.aspect;
+    }
+    const gridW = cols * cw + (cols - 1) * gap;
+    r.cross.items.forEach((item, i) => {
+      const x = M + (CONTENT_W - gridW) / 2 + (i % cols) * (cw + gap);
+      const yy = y + Math.floor(i / cols) * (ch + label + gap);
+      ctx.font = font(8.5, 700);
+      ctx.fillStyle = INK;
+      ctx.fillText(`${item.label}`, x, yy + 3);
+      ctx.font = font(7.5);
+      ctx.fillStyle = MUTED;
+      ctx.fillText(item.detail, x + ctx.measureText(`${item.label}  `).width + 1.5, yy + 3);
+      imageBox(ctx, r.cross.render(i, cw, ch), x, yy + label - 1, cw, ch);
+    });
+    pages.push(canvas);
+  }
+
+  // Page 3+: current views and the measurement table.
+  {
+    let { canvas, ctx } = newPage();
+    let y = header(ctx, r, r.views.title);
+    const gap = 6;
+    const w = (CONTENT_W - gap) / 2;
+    const h = 66;
+    r.views.tiles.forEach((tile, i) => {
+      const x = M + (i % 2) * (w + gap);
+      const yy = y + Math.floor(i / 2) * (h + 9);
+      caption(ctx, tile.title, x, yy + 3, tile.subtitle);
+      imageBox(ctx, tile.render(w, h), x, yy + 5, w, h);
+    });
+    y += Math.ceil(r.views.tiles.length / 2) * (h + 9) + 4;
+    caption(ctx, r.views.measurementsTitle, M, y + 3);
+    y += 9;
+    if (!r.views.measurements.length) {
+      ctx.font = font(9);
+      ctx.fillStyle = MUTED;
+      ctx.fillText(r.views.none, M, y);
+      pages.push(canvas);
+    } else {
+      let rows = r.views.measurements;
+      while (rows.length) {
+        const drawn = table(ctx, rows, r.views.columns, M, y, FOOTER_Y - 4);
+        pages.push(canvas);
+        rows = rows.slice(drawn);
+        if (rows.length) {
+          ({ canvas, ctx } = newPage());
+          y = header(ctx, r, r.views.title) + 4;
+        }
+      }
+    }
+  }
+
+  pages.forEach((canvas, i) => {
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(PX, 0, 0, PX, 0, 0);
+    footer(ctx, r, i + 1, pages.length);
+  });
+
+  const encoded = [];
+  for (const canvas of pages) encoded.push(await toJpeg(canvas));
+  return buildPdf(encoded, { title: r.documentTitle, author: r.appName, creator: r.appName });
+}

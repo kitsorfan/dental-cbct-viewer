@@ -1,0 +1,16 @@
+{
+  "name": "dental-cbct-viewer",
+  "version": "1.0.0",
+  "description": "Dental CBCT viewer that runs entirely in the browser: panoramic, cross-sections, 3D, measurements and PDF reports.",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "dev": "node scripts/serve.mjs",
+    "build": "node scripts/build.mjs",
+    "test": "node --test \"test/*.test.mjs\""
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
