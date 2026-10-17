@@ -5,13 +5,15 @@
 
 A dental CBCT viewer that runs entirely in the browser. Open a scan folder and get a panoramic reconstruction, cross-sections along the arch, axial/coronal/sagittal slices, a 3D rendering, measurements and a one-click PDF report with serial cross-sections every millimetre. Nothing to install, nothing stored, and the scan never leaves your computer.
 
-**[Open the viewer](https://kitsorfan.github.io/dental-cbct-viewer/)** · **[Try the demo scan](https://kitsorfan.github.io/dental-cbct-viewer/?demo)** · **[Download for offline use](https://github.com/kitsorfan/dental-cbct-viewer/releases/latest/download/dental-cbct-viewer.html)** · **[Privacy, live](https://kitsorfan.github.io/dental-cbct-viewer/#privacy)**
+**[Open the viewer](https://kitsorfan.github.io/dental-cbct-viewer/)** · **[Download for offline use](https://github.com/kitsorfan/dental-cbct-viewer/releases/latest/download/dental-cbct-viewer.html)** · **[Privacy, live](https://kitsorfan.github.io/dental-cbct-viewer/#privacy)**
+
+Try it with **[the synthetic demo jaw](https://kitsorfan.github.io/dental-cbct-viewer/?demo)** (opens instantly) or **[a real public scan](https://github.com/kitsorfan/dental-cbct-viewer/releases/download/demo-data/dental-cbct-demo-kavo.zip)** (91 MB; unzip it and drag the folder in).
 
 English · Ελληνικά · Français
 
 ![The viewer showing the synthetic demo scan](docs/screenshot.jpg)
 
-<sub>All images in this README come from the built-in synthetic demo scan, not from a patient.</sub>
+<sub>Images: anonymized public CBCT (case K01) by Feng L, Li Z, Gu Q, Wang Y and Yu X, [Science Data Bank](https://doi.org/10.57760/sciencedb.26465), CC BY 4.0, cropped and de-identified for this demo. The arch was found automatically.</sub>
 
 ## Using it
 
@@ -100,6 +102,10 @@ Pushing to `main` runs the tests and deploys the built page to GitHub Pages. Pus
 This software is for reviewing scans only. It is not a certified medical device and must not be used as the sole basis for diagnosis or treatment planning; use certified software for clinical decisions. The full [terms of use](https://kitsorfan.github.io/dental-cbct-viewer/#terms) are in the app.
 
 This project is independent and not affiliated with or endorsed by Carestream Dental. Carestream and CS 3D Imaging are trademarks of their respective owners and are named only to describe file compatibility.
+
+## Credits
+
+The real demo scan comes from *Adults' dental cone beam computed tomography images dataset for detecting and classifying missing teeth* by Feng L, Li Z, Gu Q, Wang Y and Yu X ([Science Data Bank](https://doi.org/10.57760/sciencedb.26465); [Scientific Data, 2026](https://doi.org/10.1038/s41597-026-07156-9)), licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). The authors report ethics approval and patient consent for sharing. For the demo it was cropped to the jaws, its dates and device identifiers were removed and it was given new DICOM UIDs; pixel values are unchanged.
 
 ## License
 

@@ -329,6 +329,11 @@ body[data-tool="wl"] .canvas-wrap canvas { cursor: ns-resize; }
 .welcome .actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; }
 .welcome .hint { margin: 18px 0 6px; font-size: 12px; }
 .welcome .link svg { width: 15px; height: 15px; }
+.welcome .real-demo { margin: 16px auto 0; padding: 12px 14px; max-width: 440px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); }
+.welcome .real-demo a { display: inline-flex; align-items: center; gap: 7px; color: var(--accent); font-weight: 600; text-decoration: none; }
+.welcome .real-demo a:hover { text-decoration: underline; }
+.welcome .real-demo svg { width: 17px; height: 17px; }
+.welcome .real-demo p { margin: 6px 0 0; font-size: 12px; }
 .welcome .error { margin: 12px 0 0; color: var(--danger); }
 
 .drop-hint {

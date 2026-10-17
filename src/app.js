@@ -13,6 +13,8 @@ const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
 const REPO_URL = 'https://github.com/kitsorfan/dental-cbct-viewer';
 const CREATOR = 'Kitsos Orfanopoulos';
+// Real anonymized scan (CC BY 4.0), offered as a download so the page itself never connects anywhere.
+const DEMO_SCAN = { url: `${REPO_URL}/releases/download/demo-data/dental-cbct-demo-kavo.zip`, size: '91 MB' };
 const CROSS_STEPS = [0.5, 1, 2, 5]; // mm
 const LEGACY_STORAGE_KEYS = ['dental-cbct-viewer.lang']; // written by v1.0.0, removed on start
 const KINDS_2D = ['pano', 'axial', 'cross', 'coronal', 'sagittal'];
@@ -1110,6 +1112,7 @@ function bindUi() {
   $('#openBtn').addEventListener('click', pick);
   $('#welcomeOpen').addEventListener('click', pick);
   $('#welcomeDemo').addEventListener('click', openDemo);
+  $('#welcomeReal').href = DEMO_SCAN.url;
   input.addEventListener('change', () => {
     const entries = entriesFromInput(input.files);
     input.value = '';
@@ -1223,6 +1226,7 @@ function routeHash() {
 }
 
 function renderAbout() {
+  $('#welcomeRealLabel').textContent = t('welcome.real', { size: DEMO_SCAN.size });
   $('#aboutVersion').textContent = t('about.version', { v: document.documentElement.dataset.version || 'dev' });
   $('#aboutCreator').textContent = t('about.creator', { name: CREATOR });
 }
