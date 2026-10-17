@@ -3,11 +3,11 @@
 [![CI](https://github.com/kitsorfan/dental-cbct-viewer/actions/workflows/ci.yml/badge.svg)](https://github.com/kitsorfan/dental-cbct-viewer/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-2ec4b6.svg)](LICENSE)
 
-A dental CBCT viewer that runs entirely in the browser. Open a scan folder and get a panoramic reconstruction, cross-sections along the arch, axial/coronal/sagittal slices, a 3D rendering, measurements and a one-click PDF report with serial cross-sections every millimetre. Nothing to install, nothing stored, and the scan never leaves your computer.
+A dental CBCT viewer that runs entirely in the browser. Open a scan folder or its ZIP file and get a panoramic reconstruction, cross-sections along the arch, axial/coronal/sagittal slices, a 3D rendering, measurements and a one-click PDF report with serial cross-sections every millimetre. It works on computers, tablets and phones. Nothing to install, nothing stored, and the scan never leaves your device.
 
 **[Open the viewer](https://kitsorfan.github.io/dental-cbct-viewer/)** · **[Download for offline use](https://github.com/kitsorfan/dental-cbct-viewer/releases/latest/download/dental-cbct-viewer.html)** · **[Privacy, live](https://kitsorfan.github.io/dental-cbct-viewer/#privacy)**
 
-Try it with **[the synthetic demo jaw](https://kitsorfan.github.io/dental-cbct-viewer/?demo)** (opens instantly) or **[a real public scan](https://github.com/kitsorfan/dental-cbct-viewer/releases/download/demo-data/dental-cbct-demo-kavo.zip)** (91 MB; unzip it and drag the folder in).
+Try it with **[the synthetic demo jaw](https://kitsorfan.github.io/dental-cbct-viewer/?demo)** (opens instantly) or **[a real public scan](https://github.com/kitsorfan/dental-cbct-viewer/releases/download/demo-data/dental-cbct-demo-kavo.zip)** (91 MB; open the ZIP as it is).
 
 English · Ελληνικά · Français
 
@@ -18,7 +18,7 @@ English · Ελληνικά · Français
 ## Using it
 
 1. Open the viewer online, or the downloaded `dental-cbct-viewer.html`, which also works offline from a USB stick or a shared folder.
-2. Drag the scan folder onto the window, or click **Open scan…** and pick it. The patient's folder, the `Data` folder of an export or the root of a CD all work.
+2. Drag the scan folder or its ZIP file onto the window, or click **Open scan…** and pick it. The patient's folder, the `Data` folder of an export or the root of a CD all work. On a phone, pick the ZIP file as it is; there is no need to unzip it.
 3. Click the panoramic to see the cross-section at that point. **PDF report** creates the whole document in one click.
 
 The **?** button opens the user guide; the **ⓘ** button opens About, Privacy and Terms.
@@ -32,6 +32,16 @@ The **?** button opens the user guide; the **ⓘ** button opens About, Privacy a
 | Double-click, **F** or ⤢ | Expand a view to fill the window |
 | **S** or the camera icon | Save a view as PNG |
 
+On a phone or tablet:
+
+| | |
+|---|---|
+| Tap or drag | The selected tool; tap the panoramic to show the cross-section there |
+| Two fingers | Pinch to zoom, drag to pan (also rotates and zooms the 3D view) |
+| Double-tap | Expand a view; finishes a drawn arch |
+| **Scroll slices** tool | Drag up or down to step through slices, like the mouse wheel |
+| Tabs at the bottom (phones) | Choose the view shown below the panoramic |
+
 ## Features
 
 - **Dental views**: panoramic reconstruction along the arch (adjustable slab thickness, average or MIP), cross-sections perpendicular to the arch, linked axial/coronal/sagittal slices and a 3D view (bone surface, teeth surface, MIP, simulated X-ray).
@@ -43,6 +53,8 @@ The **?** button opens the user guide; the **ⓘ** button opens About, Privacy a
   - serial cross-sections along the whole arch, every 1 mm by default (0.5, 2 or 5 mm on request), numbered and matched to marks on the panoramic;
   - the current views with every measurement in a table.
 - **Exports**: PNG of any view and a snapshot of the whole layout.
+- **Phones and tablets**: layouts for phones (the panoramic plus one chosen view), tablets in portrait and landscape, touch gestures and finger-sized controls.
+- **ZIP files** open directly, read in place by the browser without unpacking to disk, including ZIP64 archives.
 - **Three languages**, picked from the browser or the toolbar: English, Greek and French.
 - **Help centre** with a user guide, a live privacy check, About and Terms of use.
 
@@ -76,7 +88,7 @@ There are no dependencies; Node 22 or newer is needed only for the tests and the
 
 ```sh
 npm run dev     # serve the source at http://127.0.0.1:8080
-npm test        # unit tests: DICOM parsing and limits, reformatting, PDF writer, translations, build and CSP
+npm test        # unit tests: DICOM parsing and limits, ZIP reading, reformatting, PDF writer, translations, build and CSP
 npm run build   # bundle everything into dist/index.html
 ```
 
@@ -85,10 +97,12 @@ The tests generate their DICOM files in memory, so no patient data is needed or 
 | File | Purpose |
 |---|---|
 | `src/dicom.js` | DICOM parsing with input limits, series grouping, volume assembly, CS 3D Imaging analysis files |
+| `src/zip.js` | Reads scans straight from ZIP archives (stored, deflated, ZIP64) without unpacking them |
 | `src/reslice.js` | Orthogonal, panoramic and cross-sectional reformatting |
 | `src/autoarch.js` | Finds the dental arch from the teeth when a scan has no analysis |
 | `src/viewport.js` | 2D view rendering, zoom/pan and input |
 | `src/vr.js` | WebGL2 ray-marched 3D rendering |
+| `src/touch.js` | Finger tracking shared by the views: pinch and double-tap |
 | `src/report.js`, `src/pdf.js` | PDF report layout and a small PDF writer |
 | `src/phantom.js` | Synthetic demo scan |
 | `src/i18n.js` | English, Greek and French strings, including the guide, privacy and terms pages |

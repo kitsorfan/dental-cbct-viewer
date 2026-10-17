@@ -2,6 +2,7 @@ import { Viewport } from './viewport.js';
 import { VolumeView } from './vr.js';
 import * as R from './reslice.js';
 import { scanEntries, loadSeries, entriesFromDrop, entriesFromInput } from './dicom.js';
+import { expandArchives } from './zip.js';
 import { makePhantom } from './phantom.js';
 import { detectArch } from './autoarch.js';
 import { createReport, CSS_PER_MM, PIXEL_RATIO } from './report.js';
@@ -235,31 +236,49 @@ const hooks = {
     $('#preset').value = 'custom';
     buildLut();
   },
+  // Returns how to undo the action, for when a second finger turns the gesture into a pinch.
   dragStart(vp, mode, pos) {
     const inside = vp.inside(pos.u, pos.v);
     if (mode === 'navigate') {
+      const before = { cursor: S.cursor.slice(), csIndex: S.csIndex, csMm: S.csMm };
       navigate(vp, pos.u, pos.v);
+      return () => { Object.assign(S, before); refresh(); };
     } else if (mode === 'measure' && inside) {
       S.measuring = { type: 'distance', kind: vp.kind, key: vp.measureKey, a: [pos.u, pos.v], b: [pos.u, pos.v], sx: vp.plane.sx, sy: vp.plane.sy };
+      return () => { S.measuring = null; requestDraw(vp.kind); };
     } else if (mode === 'angle' && inside) {
       const d = S.angleDraft;
       if (!d || d.kind !== vp.kind || d.key !== vp.measureKey) {
         S.angleDraft = { type: 'angle', kind: vp.kind, key: vp.measureKey, pts: [[pos.u, pos.v]], sx: vp.plane.sx, sy: vp.plane.sy };
-      } else {
-        d.pts.push([pos.u, pos.v]);
-        if (d.pts.length === 3) {
-          S.measures.push(d);
-          S.angleDraft = null;
-        }
+        requestDraw(vp.kind);
+        return () => { S.angleDraft = d; requestDraw(); };
+      }
+      d.pts.push([pos.u, pos.v]);
+      if (d.pts.length === 3) {
+        S.measures.push(d);
+        S.angleDraft = null;
       }
       requestDraw(vp.kind);
+      return () => {
+        if (S.measures[S.measures.length - 1] === d) S.measures.pop();
+        d.pts.pop();
+        S.angleDraft = d;
+        requestDraw(vp.kind);
+      };
     } else if (mode === 'arch' && vp.kind === 'axial' && inside) {
+      const fresh = !S.drawing;
       S.drawing = S.drawing || [];
       S.drawing.push([pos.u - 0.5, pos.v - 0.5, S.cursor[2]]);
       requestDraw('axial');
+      return () => {
+        S.drawing?.pop();
+        if (fresh) S.drawing = null;
+        requestDraw('axial');
+      };
     } else if (mode === 'arch' && vp.kind !== 'axial') {
       setMessage('msg.arch.axial');
     }
+    return null;
   },
   dragMove(vp, mode, pos) {
     if (mode === 'navigate') navigate(vp, pos.u, pos.v);
@@ -276,7 +295,8 @@ const hooks = {
       requestDraw(vp.kind);
     }
   },
-  hover(vp, pos) {
+  // A lifted finger leaves its last reading in the status bar; a mouse that leaves clears it.
+  hover(vp, pos, lifted = false) {
     S.hoverKind = pos ? vp.kind : null;
     if (S.drawing && vp.kind === 'axial') {
       S.drawHover = pos;
@@ -287,6 +307,7 @@ const hooks = {
       requestDraw(vp.kind);
     }
     const el = $('#statusHover');
+    if (!pos && lifted) return;
     if (!pos || !S.vol || !vp.inside(pos.u, pos.v)) { el.textContent = ''; return; }
     const p = vp.plane;
     const raw = p.data[Math.floor(pos.v) * p.w + Math.floor(pos.u)];
@@ -338,12 +359,23 @@ function measureValue(m) {
   return m.type === 'angle' ? `${angleDeg(m.pts, m.sx, m.sy).toFixed(1)}°` : `${distanceMm(m).toFixed(2)} mm`;
 }
 
+// View controls that do not fit beside the title go to a second line rather than being cut off.
+function fitControls() {
+  for (const head of document.querySelectorAll('.vhead')) {
+    const ctl = head.querySelector('.vctl');
+    if (!ctl || !head.offsetParent) continue;
+    head.classList.remove('stacked');
+    head.classList.toggle('stacked', ctl.scrollWidth > ctl.clientWidth + 1);
+  }
+}
+
 // Maximise one view, or restore the grid when it is already maximised.
 function toggleMax(el) {
   const grid = $('#grid');
   const on = !el.classList.contains('maximized');
   document.querySelectorAll('.view.maximized').forEach((v) => v.classList.remove('maximized'));
   grid.classList.toggle('max', on);
+  document.body.classList.toggle('expanded', on); // phones also fold the toolbar away
   if (on) el.classList.add('maximized');
   document.querySelectorAll('.view .expand').forEach((b) => {
     b.title = t(b.closest('.view').classList.contains('maximized') ? 'collapse.title' : 'expand.title');
@@ -386,6 +418,7 @@ function fillArchSelect() {
   sel.disabled = false;
   S.arches.forEach((a, i) => sel.append(new Option(archName(a), String(i))));
   sel.value = String(S.archIdx);
+  fitControls();
 }
 
 function finishArch() {
@@ -953,9 +986,13 @@ function renderMessage() {
   $('#statusMsg').textContent = m ? t(m.key, typeof m.vars === 'function' ? m.vars() : m.vars) : '';
 }
 
+// Phones and tablets without a mouse: tap wording, ZIP-first opening, touch help first.
+const touchOnly = () => matchMedia('(hover: none) and (pointer: coarse)').matches;
+const TOOL_MESSAGES = ['msg.arch.draw', 'msg.arch.tap', 'msg.angle', 'msg.angle.tap', 'msg.arch.axial'];
+
 function setTool(tool) {
   S.tool = tool;
-  document.querySelectorAll('[data-tool]').forEach((b) => b.classList.toggle('active', b.dataset.tool === tool));
+  document.querySelectorAll('button[data-tool]').forEach((b) => b.classList.toggle('active', b.dataset.tool === tool));
   document.body.dataset.tool = tool;
   if (tool !== 'arch' && S.drawing) {
     S.drawing = null;
@@ -965,9 +1002,37 @@ function setTool(tool) {
     S.angleDraft = null;
     requestDraw();
   }
-  if (tool === 'arch') setMessage('msg.arch.draw');
-  else if (tool === 'angle') setMessage('msg.angle');
-  else if (S.message && ['msg.arch.draw', 'msg.angle', 'msg.arch.axial'].includes(S.message.key)) setMessage(null);
+  if (tool === 'arch') {
+    revealView('axial');
+    setMessage(touchOnly() ? 'msg.arch.tap' : 'msg.arch.draw');
+  } else if (tool === 'angle') {
+    setMessage(touchOnly() ? 'msg.angle.tap' : 'msg.angle');
+  } else if (S.message && TOOL_MESSAGES.includes(S.message.key)) {
+    setMessage(null);
+  }
+}
+
+// Phones show the panoramic and one other view; this picks the other one.
+function showSecond(kind) {
+  $('#grid').dataset.second = kind;
+  document.querySelectorAll('#viewtabs [data-show]').forEach((b) => {
+    const on = b.dataset.show === kind;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-selected', String(on));
+  });
+}
+
+function setMenu(open) {
+  $('#topbar').classList.toggle('open', open);
+  $('#moreBtn').setAttribute('aria-expanded', String(open));
+}
+
+// Make sure a view is on screen: leave another view's full-window mode, pick its phone tab.
+function revealView(kind) {
+  const el = document.querySelector(`.view[data-view="${kind}"]`);
+  const max = document.querySelector('.view.maximized');
+  if (max && max !== el) toggleMax(max);
+  if (!el.offsetParent) showSecond(kind);
 }
 
 function fillPresetSelect() {
@@ -1008,6 +1073,7 @@ function applyVrPreset(id) {
   const level = p.level ?? vrLevel(p.hu);
   $('#vrLevel').value = level;
   applyVrLevel(level);
+  fitControls();
 }
 
 function applyVrLevel(level) {
@@ -1046,11 +1112,12 @@ function applyLanguage(lang, chosen = false) {
   document.querySelectorAll('.view .expand').forEach((b) => {
     b.title = t(b.closest('.view').classList.contains('maximized') ? 'collapse.title' : 'expand.title');
   });
+  fitControls();
   requestDraw();
 }
 
 function bindUi() {
-  document.querySelectorAll('[data-tool]').forEach((b) => b.addEventListener('click', () => setTool(b.dataset.tool)));
+  document.querySelectorAll('button[data-tool]').forEach((b) => b.addEventListener('click', () => setTool(b.dataset.tool)));
   $('#preset').addEventListener('change', (e) => applyPreset(e.target.value));
   $('#lang').addEventListener('change', (e) => applyLanguage(e.target.value, true));
 
@@ -1073,6 +1140,21 @@ function bindUi() {
   document.querySelectorAll('.view').forEach((el) => {
     el.querySelector('.expand').addEventListener('click', () => toggleMax(el));
     el.querySelector('.save').addEventListener('click', () => saveView(el.dataset.view));
+  });
+  document.querySelectorAll('#viewtabs [data-show]').forEach((b) => b.addEventListener('click', () => {
+    const max = document.querySelector('.view.maximized');
+    if (max) toggleMax(max);
+    showSecond(b.dataset.show);
+  }));
+
+  // The ⋯ menu on narrow screens closes after an action, or a tap anywhere else.
+  const topbar = $('#topbar');
+  const more = $('#more');
+  more.addEventListener('click', (e) => { if (e.target.closest('button')) setMenu(false); });
+  more.addEventListener('change', (e) => { if (e.target.matches('select')) setMenu(false); });
+  $('#moreBtn').addEventListener('click', () => setMenu(!topbar.classList.contains('open')));
+  document.addEventListener('pointerdown', (e) => {
+    if (topbar.classList.contains('open') && !e.target.closest('#more, #moreBtn')) setMenu(false);
   });
 
   $('#helpBtn').addEventListener('click', () => openCenter('guide'));
@@ -1107,17 +1189,21 @@ function bindUi() {
   $('#vrLevel').addEventListener('input', (e) => applyVrLevel(Number(e.target.value)));
   $('#series').addEventListener('change', (e) => load(e.target.value));
 
-  const input = $('#folderInput');
-  const pick = () => input.click();
-  $('#openBtn').addEventListener('click', pick);
-  $('#welcomeOpen').addEventListener('click', pick);
+  // A folder on computers; on phones the scan usually arrives as a ZIP, and older ones cannot pick folders.
+  const folder = $('#folderInput');
+  const files = $('#fileInput');
+  $('#openBtn').addEventListener('click', () => (touchOnly() ? files : folder).click());
+  $('#welcomeOpen').addEventListener('click', () => folder.click());
+  $('#welcomeFiles').addEventListener('click', () => files.click());
   $('#welcomeDemo').addEventListener('click', openDemo);
   $('#welcomeReal').href = DEMO_SCAN.url;
-  input.addEventListener('change', () => {
-    const entries = entriesFromInput(input.files);
-    input.value = '';
-    openEntries(entries);
-  });
+  for (const input of [folder, files]) {
+    input.addEventListener('change', () => {
+      const entries = entriesFromInput(input.files);
+      input.value = '';
+      openEntries(entries);
+    });
+  }
 
   const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
   let depth = 0;
@@ -1145,6 +1231,8 @@ function bindUi() {
     const hovered = S.hoverKind && views[S.hoverKind];
     if (k === 'Escape' && !$('#center').hidden) {
       closeCenter();
+    } else if (k === 'Escape' && $('#topbar').classList.contains('open')) {
+      setMenu(false);
     } else if (k === 'Escape') {
       S.drawing = null;
       S.measuring = null;
@@ -1174,7 +1262,7 @@ function bindUi() {
     } else if (k === '?') {
       openCenter('guide');
     } else {
-      const tool = { n: 'navigate', w: 'wl', p: 'pan', z: 'zoom', m: 'measure', l: 'angle', a: 'arch' }[k];
+      const tool = { n: 'navigate', k: 'scroll', w: 'wl', p: 'pan', z: 'zoom', m: 'measure', l: 'angle', a: 'arch' }[k];
       if (tool) setTool(tool);
     }
   });
@@ -1373,12 +1461,12 @@ async function load(id) {
   }
 }
 
-// Files picked or dropped by the user; nothing leaves the browser.
+// Files picked or dropped by the user, or the files inside a picked ZIP; nothing leaves the browser.
 async function openEntries(entries) {
   if (!entries.length) return;
   try {
     showLoading(t('loading.scan'), 0);
-    const found = await scanEntries(entries, (f) => showLoading(t('loading.scan'), f));
+    const found = await scanEntries(await expandArchives(entries), (f) => showLoading(t('loading.scan'), f));
     S.series = found.map((s) => ({
       id: s.id,
       label: `${s.patientName || s.dir || 'Scan'} — ${s.studyDate} (${s.count})`,
@@ -1477,15 +1565,19 @@ function renderPatient() {
     m.model,
     `${nx}×${ny}×${nz} @ ${+m.spacing[0].toFixed(3)} mm`,
   ].filter(Boolean);
+  // Phones show only the name when there is one.
+  const details = document.createElement('span');
+  details.className = 'details';
   for (const part of parts) {
-    if (el.childNodes.length) {
+    if (el.childNodes.length || details.childNodes.length) {
       const sep = document.createElement('span');
       sep.className = 'sep';
       sep.textContent = '·';
-      el.append(sep);
+      details.append(sep);
     }
-    el.append(document.createTextNode(part));
+    details.append(document.createTextNode(part));
   }
+  el.append(details);
 }
 
 function prepare3d() {
@@ -1517,6 +1609,18 @@ function start() {
   if (vr.failed) {
     vr.el = vrEl;
     vrEl.querySelector('.canvas-wrap').insertAdjacentHTML('beforeend', '<div class="empty"></div>');
+  }
+  document.querySelectorAll('#viewtabs [data-show]').forEach((b) => b.style.setProperty('--accent', COLORS[b.dataset.show]));
+  showSecond('cross');
+  // A view's size is set by the layout, never by its header, so this cannot feed back on itself.
+  const viewSizes = new ResizeObserver(fitControls);
+  document.querySelectorAll('.view').forEach((el) => viewSizes.observe(el));
+  if (touchOnly()) {
+    const files = $('#welcomeFiles'), folder = $('#welcomeOpen');
+    files.classList.replace('ghost', 'primary');
+    folder.classList.replace('primary', 'ghost');
+    files.after(folder);
+    $('.mouse-help').before($('.touch-help'));
   }
 
   for (const key of LEGACY_STORAGE_KEYS) {

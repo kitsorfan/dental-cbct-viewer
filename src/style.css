@@ -21,6 +21,9 @@
 
 * { box-sizing: border-box; }
 
+/* Pinch-zoom stays available for the page; double-tap zoom would fight the views' own double-tap. */
+html { touch-action: manipulation; -webkit-text-size-adjust: 100%; }
+
 html, body {
   height: 100%;
   margin: 0;
@@ -30,10 +33,16 @@ html, body {
   overflow: hidden;
 }
 
+/* dvh follows mobile browser bars as they show and hide; the insets keep clear of notches. */
 body {
+  height: 100dvh;
   display: grid;
-  grid-template-rows: auto 1fr auto;
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  padding: 0 env(safe-area-inset-right) 0 env(safe-area-inset-left);
 }
+
+.topbar, .grid, .viewtabs, .status { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+button, select, label, a { -webkit-tap-highlight-color: transparent; }
 
 .sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
 
@@ -193,6 +202,8 @@ input[type="range"]::-moz-range-thumb {
 /* ---------------------------------------------------------------- layout */
 
 .topbar {
+  position: relative;
+  z-index: 4;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -208,8 +219,14 @@ input[type="range"]::-moz-range-thumb {
 .patient strong { color: var(--text); font-weight: 600; }
 .patient .sep { margin: 0 7px; opacity: 0.5; }
 .group { display: flex; flex: none; gap: 5px; align-items: center; }
-.group + .group, .segmented + .group { padding-left: 10px; border-left: 1px solid var(--line); }
+.topbar .group { padding-left: 10px; border-left: 1px solid var(--line); }
 body:not(.has-scan) .needs-scan { opacity: 0.4; pointer-events: none; }
+/* On wide screens the menu's groups sit inline, with the report button before language and help. */
+.more { display: contents; }
+.report-group { order: 1; }
+.topbar .report-group { padding-left: 0; border-left: 0; }
+.help-group { order: 2; }
+#moreBtn { display: none; order: 3; }
 
 .grid {
   display: grid;
@@ -256,13 +273,22 @@ body:not(.has-scan) .needs-scan { opacity: 0.4; pointer-events: none; }
 .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--accent); flex: none; }
 .vtitle { font-weight: 600; }
 .vinfo { color: var(--muted); overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1 1 0; }
-.vctl { display: flex; flex: 0 1 auto; align-items: center; gap: 6px; min-width: 0; overflow: hidden; }
+.vctl { display: flex; flex: 0 1 auto; align-items: center; gap: 6px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.vctl::-webkit-scrollbar { display: none; }
 .vctl select { padding-left: 9px; padding-right: 26px; background-position: right 7px center; font-size: 12px; }
 .vctl label.range { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; }
 .vctl input[type="range"] { width: clamp(56px, 6vw, 110px); accent-color: var(--accent); }
 .vctl input[type="range"]::-webkit-slider-thumb { background: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 .vctl output { min-width: 48px; color: var(--text); font-variant-numeric: tabular-nums; font-size: 12px; }
 .vbtns { display: flex; flex: none; gap: 1px; margin-left: 2px; padding-left: 4px; border-left: 1px solid var(--line); }
+/* Set by the app when the controls do not fit beside the title. */
+.vhead.stacked { flex-wrap: wrap; }
+.vhead.stacked .vctl { order: 1; flex: 1 0 100%; padding: 2px 0 4px; }
+/* On their own line the slider takes the spare room, and long selects give way before it does. */
+.vhead.stacked .vctl select { min-width: min(6.5em, 28%); }
+.vhead.stacked .vctl label.range { flex: 1 1 auto; }
+.vhead.stacked .vctl input[type="range"] { flex: 1 1 56px; width: 56px; }
+.vhead.stacked .vctl output { flex: none; }
 .expand .i-collapse, .view.maximized .expand .i-expand { display: none; }
 .view.maximized .expand .i-collapse { display: block; }
 
@@ -308,6 +334,7 @@ body[data-tool="wl"] .canvas-wrap canvas { cursor: ns-resize; }
   inset: 0;
   display: grid;
   place-items: center;
+  overflow-y: auto;
   padding: 16px;
   background: radial-gradient(circle at 50% 40%, rgba(46, 196, 182, 0.08), transparent 55%), rgba(5, 7, 10, 0.86);
   z-index: 5;
@@ -420,7 +447,7 @@ body.dragging .drop-hint { display: grid; }
 .prose li { margin: 6px 0; }
 .prose li::marker { color: var(--accent); }
 .prose b { color: var(--text); }
-.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 0 28px; }
+.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); gap: 0 28px; }
 .center dl { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; }
 .center dt { color: var(--accent); font-weight: 600; }
 .center dd { margin: 0; color: #c9d2dc; }
@@ -478,4 +505,167 @@ body.dragging .drop-hint { display: grid; }
   .check { grid-template-columns: 18px 1fr; }
   .check .v { grid-column: 2; }
   .tabs { margin: 0; order: 3; width: 100%; overflow-x: auto; }
+}
+
+/* ---------------------------------------------------------------- phones and tablets */
+
+/* View picker for phones, where only the panoramic and one other view fit. */
+.viewtabs {
+  display: none;
+  gap: 4px;
+  padding: 4px 6px calc(4px + env(safe-area-inset-bottom));
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+}
+/* Each tab is underlined in its view's colour, matching the dot in the view's title bar. */
+.viewtabs button {
+  display: block;
+  flex: 1 1 0;
+  min-width: 0;
+  height: 34px;
+  padding: 0 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  box-shadow: inset 0 -2px 0 color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.viewtabs button:hover { background: var(--panel-2); color: var(--text); }
+.viewtabs button.active { background: var(--panel-3); color: var(--text); font-weight: 600; box-shadow: inset 0 -3px 0 var(--accent); }
+
+/* Fingers need bigger targets. iOS zooms the page into any select under 16px when it is tapped. */
+@media (pointer: coarse) {
+  :root { --control-h: 38px; }
+  .vhead { --control-h: 32px; min-height: 40px; }
+  select, .vctl select { font-size: 16px; }
+  button.icon { width: 36px; height: 34px; }
+  .segmented button { width: 42px; height: 34px; }
+  .switch input { width: 40px; height: 24px; border-radius: 12px; }
+  .switch input::before { width: 20px; height: 20px; }
+  .switch input:checked::before { transform: translateX(16px); }
+  input[type="range"] { height: 32px; }
+  input[type="range"]::-webkit-slider-thumb { width: 22px; height: 22px; margin-top: -9px; }
+  input[type="range"]::-moz-range-thumb { width: 18px; height: 18px; }
+  .vctl input[type="range"] { width: clamp(80px, 22vw, 140px); }
+  .tabs button { height: 36px; }
+  .center-close { width: 40px; height: 40px; }
+}
+
+/* Narrow screens and tablets: the less used controls move behind the ⋯ button. */
+@media (max-width: 1023px), (max-height: 499px), (pointer: coarse) and (max-width: 1399px) {
+  .more {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 8px;
+    z-index: 1;
+    display: none;
+    flex-direction: column;
+    gap: 10px;
+    width: min(340px, calc(100vw - 16px));
+    max-height: calc(100dvh - 120px);
+    overflow-y: auto;
+    padding: 12px;
+    background: var(--panel);
+    border: 1px solid var(--line-strong);
+    border-radius: 12px;
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5);
+  }
+  .topbar.open .more { display: flex; }
+  .more .group { flex-wrap: wrap; gap: 8px; padding: 10px 0 0; border-left: 0; border-top: 1px solid var(--line); }
+  .more .group:first-child { padding-top: 0; border-top: 0; }
+  .more #preset, .more .lang { flex: 1; }
+  .more .lang select { width: 100%; }
+  #moreBtn { display: inline-flex; }
+  #moreBtn[aria-expanded="true"] { background: var(--panel-3); border-color: var(--line-strong); }
+}
+@media (max-width: 1099px), (max-height: 499px) {
+  .topbar .brand span { display: none; }
+}
+@media (max-width: 899px), (max-height: 499px) {
+  #openBtn { width: var(--control-h); padding: 0; }
+  #openBtn span { display: none; }
+}
+
+/* Tablets in portrait: the panoramic across the top, the tall cross-section beside four views. */
+@media (orientation: portrait) and (min-width: 600px), (min-width: 600px) and (max-width: 899px) and (min-height: 500px) {
+  .grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-rows: minmax(0, 0.8fr) minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-areas:
+      "pano pano pano"
+      "cross axial vr"
+      "cross coronal sagittal";
+  }
+}
+
+/* Phones: the panoramic and one other view, chosen with the tabs. */
+@media (max-width: 599px), (max-height: 499px) {
+  .grid {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 0.8fr) minmax(0, 1.2fr);
+    grid-template-areas: "pano" "second";
+  }
+  .grid > .view:not([data-view="pano"]) { display: none; }
+  .grid[data-second="cross"] > [data-view="cross"],
+  .grid[data-second="axial"] > [data-view="axial"],
+  .grid[data-second="coronal"] > [data-view="coronal"],
+  .grid[data-second="sagittal"] > [data-view="sagittal"],
+  .grid[data-second="vr"] > [data-view="vr"] { display: flex; grid-area: second; }
+  .grid.max > .view:not(.maximized) { display: none; }
+  .viewtabs { display: flex; }
+
+  .report-group button { width: var(--control-h); padding: 0; }
+  .report-group button span { display: none; }
+  .patient strong + .details { display: none; }
+
+  .status { gap: 10px; padding: 4px 10px calc(4px + env(safe-area-inset-bottom)); white-space: normal; }
+  #statusHover { flex: 0 1 auto; white-space: nowrap; }
+  #statusMsg { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; font-size: 12px; line-height: 1.3; }
+  #statusWL { display: none; }
+  .badge { width: 28px; padding: 0; }
+  .badge span { display: none; }
+  .vctl label.range > span { display: none; }
+
+  /* An expanded view gets the screen: only the tools and the ⋯ menu stay, in one row. */
+  body.expanded .topbar > :not(.tools, .more, #moreBtn) { display: none; }
+  body.expanded #moreBtn { margin-left: auto; }
+  body.expanded .viewtabs { display: none; }
+  body.expanded .status { grid-column: 1 / -1; }
+}
+
+/* Phones held upright: the tools get a row of their own. */
+@media (max-width: 599px) {
+  .topbar { gap: 8px; padding: 8px 10px; }
+  .tools { order: 10; display: flex; flex: 1 0 100%; }
+  body.expanded .tools { order: 0; flex: 1 1 auto; }
+  .tools button { flex: 1 1 0; width: auto; }
+  .vhead { padding-left: 8px; }
+
+  .center { padding: 0; }
+  .center .sheet { width: 100%; height: 100%; border: 0; border-radius: 0; }
+  .center-head { gap: 8px; padding: 8px 8px 8px 14px; }
+  .center-body { padding: 0 16px calc(24px + env(safe-area-inset-bottom)); }
+  .center dl { grid-template-columns: 1fr; gap: 2px; }
+  .center dd { margin-bottom: 10px; }
+
+  .welcome { padding: 10px; }
+  .welcome .card { padding: 22px 18px 18px; border-radius: 14px; }
+  .welcome h1 { font-size: 19px; }
+  .welcome .actions button { flex: 1 1 100%; }
+}
+
+/* Phones on their side: views side by side, tabs and status sharing the bottom row. */
+@media (max-height: 499px) and (orientation: landscape) {
+  body { grid-template-columns: auto minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto; }
+  .topbar, .grid { grid-column: 1 / -1; }
+  .topbar { padding-top: 6px; padding-bottom: 6px; }
+  .grid {
+    grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+    grid-template-areas: "pano second";
+  }
+  .viewtabs { border-right: 1px solid var(--line); }
+  .viewtabs button { flex: none; height: 30px; padding: 0 10px; }
 }

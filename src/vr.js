@@ -1,6 +1,11 @@
 // WebGL2 ray-marched volume rendering (iso-surface, MIP, simulated X-ray).
 // World axes match voxel axes: +x patient left, +y posterior, +z superior.
 
+import { Touches } from './touch.js';
+
+const MIN_DIST = 0.8, MAX_DIST = 6;
+const clampDist = (d) => Math.min(MAX_DIST, Math.max(MIN_DIST, d));
+
 const VS = `#version 300 es
 out vec2 vNdc;
 void main() {
@@ -305,35 +310,61 @@ export class VolumeView {
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
 
+  // Drag to rotate; right-drag, the wheel or a two-finger pinch to zoom.
   bind() {
     const c = this.canvas;
-    let drag = null;
+    const touches = new Touches();
+    let drag = null, pinch = null, pointerType = 'mouse';
+    const startPinch = () => { pinch = { spread: touches.pair().dist, dist: this.dist }; };
     c.addEventListener('contextmenu', (e) => e.preventDefault());
     c.addEventListener('pointerdown', (e) => {
       c.setPointerCapture(e.pointerId);
-      drag = { x: e.clientX, y: e.clientY, button: e.button };
+      pointerType = e.pointerType;
+      touches.down(e);
+      if (e.pointerType === 'touch' && touches.count === 2) {
+        drag = null;
+        startPinch();
+      } else if (touches.count === 1 && !pinch) {
+        drag = { x: e.clientX, y: e.clientY, button: e.button };
+      }
     });
     c.addEventListener('pointermove', (e) => {
+      touches.move(e);
+      if (pinch) {
+        if (touches.count < 2) return;
+        this.dist = clampDist(pinch.dist * (pinch.spread / touches.pair().dist));
+        this.render(true);
+        return;
+      }
       if (!drag) return;
       const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
       drag.x = e.clientX;
       drag.y = e.clientY;
       if (drag.button === 2) {
-        this.dist = Math.min(6, Math.max(0.8, this.dist * Math.exp(dy * 0.01)));
+        this.dist = clampDist(this.dist * Math.exp(dy * 0.01));
       } else {
         this.yaw -= dx * 0.01;
         this.pitch = Math.max(-1.5, Math.min(1.5, this.pitch + dy * 0.01));
       }
       this.render(true);
     });
-    const end = () => { drag = null; };
-    c.addEventListener('pointerup', end);
-    c.addEventListener('pointercancel', end);
+    const release = (e) => {
+      const double = touches.up(e);
+      drag = null;
+      if (pinch) {
+        if (touches.count >= 2) startPinch();
+        else if (!touches.count) pinch = null;
+        return;
+      }
+      if (double) this.hooks.dblclick(this, e);
+    };
+    c.addEventListener('pointerup', release);
+    c.addEventListener('pointercancel', release);
     c.addEventListener('wheel', (e) => {
       e.preventDefault();
-      this.dist = Math.min(6, Math.max(0.8, this.dist * Math.exp(Math.sign(e.deltaY) * 0.1)));
+      this.dist = clampDist(this.dist * Math.exp(Math.sign(e.deltaY) * 0.1));
       this.render(true);
     }, { passive: false });
-    c.addEventListener('dblclick', (e) => this.hooks.dblclick(this, e));
+    c.addEventListener('dblclick', (e) => { if (pointerType !== 'touch') this.hooks.dblclick(this, e); });
   }
 }

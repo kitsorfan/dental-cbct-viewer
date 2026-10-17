@@ -1,6 +1,14 @@
 // A 2D view: draws a grayscale plane with zoom/pan and forwards interaction to hooks.
 // Image coordinates (u, v) are in plane pixels; pixel centers sit at integer + 0.5.
 // With el = null it renders off-screen at a fixed size (used for reports and exports).
+// Touch: one finger runs the tool, two fingers pinch to zoom and drag to pan.
+
+import { Touches } from './touch.js';
+
+const MIN_ZOOM = 0.25, MAX_ZOOM = 40;
+const SCROLL_PX = 10; // drag distance per slice with the scroll tool
+// Modes the view handles itself; every other mode is a tool handled by the hooks.
+const VIEW_MODES = new Set(['pan', 'zoom', 'wl', 'scroll']);
 
 export class Viewport {
   constructor(el, kind, hooks, offscreen = null) {
@@ -128,8 +136,12 @@ export class Viewport {
   zoomAt(factor, X, Y) {
     if (!this.plane) return;
     this.layout();
-    const [u, v] = this.toImage(X, Y);
-    this.zoom = Math.min(40, Math.max(0.25, this.zoom * factor));
+    this.zoomTo(this.zoom * factor, this.toImage(X, Y), X, Y);
+  }
+
+  // Zoom so that image point (u, v) lands on screen point (X, Y).
+  zoomTo(zoom, [u, v], X, Y) {
+    this.zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom));
     this.layout();
     const [X2, Y2] = this.toScreen(u, v);
     this.panX += X - X2;
@@ -137,26 +149,62 @@ export class Viewport {
     this.hooks.invalidate(this);
   }
 
+  // The image point under the fingers stays under them while they pinch and move.
+  startPinch(pair) {
+    this.layout();
+    const r = this.canvas.getBoundingClientRect();
+    this.pinch = { dist: pair.dist, zoom: this.zoom, anchor: this.toImage(pair.x - r.left, pair.y - r.top) };
+  }
+
+  movePinch(pair) {
+    const r = this.canvas.getBoundingClientRect();
+    this.zoomTo(this.pinch.zoom * (pair.dist / this.pinch.dist), this.pinch.anchor, pair.x - r.left, pair.y - r.top);
+  }
+
+  // Abandon a tool gesture, e.g. when a second finger turns it into a pinch.
+  cancelDrag() {
+    const d = this.drag;
+    this.drag = null;
+    d?.cancel?.();
+  }
+
   bind() {
     const c = this.canvas;
+    const touches = new Touches();
+    let pointerType = 'mouse';
+    this.pinch = null;
     c.addEventListener('contextmenu', (e) => e.preventDefault());
 
     c.addEventListener('pointerdown', (e) => {
       if (!this.plane) return;
       c.setPointerCapture(e.pointerId);
+      e.preventDefault();
+      pointerType = e.pointerType;
+      touches.down(e);
+      if (e.pointerType === 'touch' && touches.count === 2) {
+        this.cancelDrag();
+        this.startPinch(touches.pair());
+        return;
+      }
+      if (touches.count > 1 || this.pinch) return;
       const pos = this.eventPos(e);
       let mode;
       if (e.button === 1 || (e.button === 0 && e.shiftKey)) mode = 'pan';
       else if (e.button === 2) mode = 'wl';
       else mode = this.hooks.tool(this);
-      this.drag = { mode, lastX: pos.X, lastY: pos.Y };
-      if (mode !== 'pan' && mode !== 'wl' && mode !== 'zoom') this.hooks.dragStart(this, mode, pos, e);
-      e.preventDefault();
+      this.drag = { mode, lastX: pos.X, lastY: pos.Y, scrolled: 0 };
+      if (!VIEW_MODES.has(mode)) this.drag.cancel = this.hooks.dragStart(this, mode, pos, e);
+      this.hooks.hover(this, pos); // a finger that taps without moving still gets a reading
     });
 
     c.addEventListener('pointermove', (e) => {
       const pos = this.eventPos(e);
       this.hover = pos;
+      touches.move(e);
+      if (this.pinch) {
+        if (touches.count >= 2) this.movePinch(touches.pair());
+        return;
+      }
       if (this.drag) {
         const dx = pos.X - this.drag.lastX, dy = pos.Y - this.drag.lastY;
         this.drag.lastX = pos.X;
@@ -173,6 +221,15 @@ export class Viewport {
           case 'wl':
             this.hooks.windowLevel(dx, dy);
             break;
+          case 'scroll':
+            // Like the wheel: dragging down moves as scrolling down does.
+            this.drag.scrolled += dy;
+            while (Math.abs(this.drag.scrolled) >= SCROLL_PX) {
+              const dir = Math.sign(this.drag.scrolled);
+              this.drag.scrolled -= dir * SCROLL_PX;
+              this.hooks.scroll(this, dir);
+            }
+            break;
           default:
             this.hooks.dragMove(this, this.drag.mode, pos, e);
         }
@@ -180,17 +237,28 @@ export class Viewport {
       this.hooks.hover(this, pos);
     });
 
-    const end = (e) => {
-      if (!this.drag) return;
-      const mode = this.drag.mode;
-      this.drag = null;
-      if (mode !== 'pan' && mode !== 'wl' && mode !== 'zoom') this.hooks.dragEnd(this, mode, this.eventPos(e), e);
+    const release = (e) => {
+      const double = touches.up(e);
+      if (this.pinch) {
+        // The pinch lasts until every finger is lifted, so the last one does not start a tool.
+        if (touches.count >= 2) this.startPinch(touches.pair());
+        else if (!touches.count) this.pinch = null;
+        return;
+      }
+      if (e.type === 'pointercancel') {
+        this.cancelDrag();
+      } else if (this.drag) {
+        const mode = this.drag.mode;
+        this.drag = null;
+        if (!VIEW_MODES.has(mode)) this.hooks.dragEnd(this, mode, this.eventPos(e), e);
+      }
+      if (double) this.hooks.dblclick(this, e);
     };
-    c.addEventListener('pointerup', end);
-    c.addEventListener('pointercancel', end);
-    c.addEventListener('pointerleave', () => {
+    c.addEventListener('pointerup', release);
+    c.addEventListener('pointercancel', release);
+    c.addEventListener('pointerleave', (e) => {
       this.hover = null;
-      this.hooks.hover(this, null);
+      this.hooks.hover(this, null, e.pointerType === 'touch');
     });
 
     c.addEventListener('wheel', (e) => {
@@ -204,6 +272,7 @@ export class Viewport {
       }
     }, { passive: false });
 
-    c.addEventListener('dblclick', (e) => this.hooks.dblclick(this, e));
+    // Touch double-taps are recognised in release(); some browsers also send dblclick for them.
+    c.addEventListener('dblclick', (e) => { if (pointerType !== 'touch') this.hooks.dblclick(this, e); });
   }
 }
