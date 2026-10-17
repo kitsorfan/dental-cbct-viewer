@@ -3,6 +3,7 @@ import { VolumeView } from './vr.js';
 import * as R from './reslice.js';
 import { scanEntries, loadSeries, entriesFromDrop, entriesFromInput } from './dicom.js';
 import { makePhantom } from './phantom.js';
+import { detectArch } from './autoarch.js';
 import { createReport, CSS_PER_MM, PIXEL_RATIO } from './report.js';
 import { drawLogo } from './brand.js';
 import { t, setLanguage, detectLanguage, getLanguage, LANGUAGES, localeFor, rememberLanguageInUrl } from './i18n.js';
@@ -368,6 +369,7 @@ function selectArch(idx) {
 
 function archName(a) {
   if (a.custom) return t('arch.custom', { n: a.custom });
+  if (a.auto) return t('arch.auto');
   return a.demo ? t('arch.demo') : a.name;
 }
 
@@ -1416,6 +1418,12 @@ function setVolume(meta, data) {
   }));
 
   S.arches = (an?.arches ?? []).map((a) => ({ name: a.name, type: a.type, points: a.points, demo: !!meta.demo }));
+  // No arch in the scan's own analysis: find one from the teeth so the panoramic works.
+  let auto = null;
+  if (!S.arches.length) {
+    auto = detectArch(S.vol);
+    if (auto) S.arches.push({ auto: true, type: 'Auto', points: auto.points });
+  }
   let idx = S.arches.findIndex((a) => a.type === 'MandibularArch');
   if (idx < 0) idx = S.arches.length ? 0 : -1;
 
@@ -1424,13 +1432,20 @@ function setVolume(meta, data) {
 
   KINDS_2D.forEach((k) => { views[k].sliceKey = null; views[k].resetView(); });
   selectArch(idx);
+  if (auto && !an?.ortho) {
+    // Start on the front teeth rather than the middle of the volume.
+    const m = S.arch.M >> 1;
+    setCursor([S.arch.x[m], S.arch.y[m], (auto.slab[0] + auto.slab[1]) / 2]);
+    refresh();
+  }
   $('#preset').value = 'bone';
   applyPreset('bone');
 
   renderPatient();
   document.title = `${meta.demo ? t('patient.demo') : meta.patientName || 'CBCT'} – ${t('app.name')}`;
   if (meta.demo) setMessage('msg.demo');
-  else if (an) setMessage('msg.loaded', { name: an.name, arches: S.arches.length, canals: S.canals.length });
+  else if (an?.arches?.length) setMessage('msg.loaded', { name: an.name, arches: S.arches.length, canals: S.canals.length });
+  else if (auto) setMessage('msg.autoarch');
   else setMessage('msg.noanalysis');
 
   $('#welcome').hidden = true;
@@ -1446,9 +1461,12 @@ function renderPatient() {
   const m = S.meta;
   if (!m) return;
   const [nx, ny, nz] = m.dims;
-  const name = document.createElement('strong');
-  name.textContent = m.demo ? t('patient.demo') : m.patientName || '';
-  el.append(name);
+  const label = m.demo ? t('patient.demo') : m.patientName;
+  if (label) {
+    const name = document.createElement('strong');
+    name.textContent = label;
+    el.append(name);
+  }
   const parts = [
     m.birthDate && t('patient.dob', { v: m.birthDate }),
     m.studyDate && t('patient.scan', { v: m.studyDate }),
@@ -1456,10 +1474,13 @@ function renderPatient() {
     `${nx}×${ny}×${nz} @ ${+m.spacing[0].toFixed(3)} mm`,
   ].filter(Boolean);
   for (const part of parts) {
-    const sep = document.createElement('span');
-    sep.className = 'sep';
-    sep.textContent = '·';
-    el.append(sep, document.createTextNode(part));
+    if (el.childNodes.length) {
+      const sep = document.createElement('span');
+      sep.className = 'sep';
+      sep.textContent = '·';
+      el.append(sep);
+    }
+    el.append(document.createTextNode(part));
   }
 }
 

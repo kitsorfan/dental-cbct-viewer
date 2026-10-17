@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const src = path.join(root, 'src');
 const dist = path.join(root, 'dist');
-const MODULES = ['i18n.js', 'brand.js', 'reslice.js', 'viewport.js', 'vr.js', 'dicom.js', 'phantom.js', 'pdf.js', 'report.js', 'app.js'];
+const MODULES = ['i18n.js', 'brand.js', 'reslice.js', 'viewport.js', 'vr.js', 'dicom.js', 'phantom.js', 'autoarch.js', 'pdf.js', 'report.js', 'app.js'];
 const EXPORT = /^export\s+(?:async\s+)?(?:function\*?|class|const|let)\s+([A-Za-z_$][\w$]*)/gm;
 
 function bundleModule(file) {

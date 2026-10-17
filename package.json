@@ -1,6 +1,6 @@
 {
   "name": "dental-cbct-viewer",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "description": "Dental CBCT viewer that runs entirely in the browser: panoramic, cross-sections, 3D, measurements and PDF reports.",
   "private": true,
   "type": "module",

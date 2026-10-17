@@ -54,3 +54,25 @@ test('crossings interpolates where a polyline meets a plane', () => {
   const hits = R.crossings([[0, 0, 0], [0, 0, 10], [0, 4, 10]], (p) => p[2] - 2.5);
   assert.deepEqual(hits, [[0, 0, 2.5]]);
 });
+
+test('finds the dental arch automatically on the demo jaw', async () => {
+  const { makePhantom } = await import('../src/phantom.js');
+  const { detectArch } = await import('../src/autoarch.js');
+  const { meta, data } = makePhantom({ voxelsPerMm: 2 });
+  const [nx, ny, nz] = meta.dims;
+  const vol = { data, nx, ny, nz, sx: meta.spacing[0], sy: meta.spacing[1], sz: meta.spacing[2] };
+  const found = detectArch(vol);
+  assert.ok(found, 'arch found');
+  const auto = R.buildArch(found.points);
+  const truth = R.buildArch(meta.analysis.arches[0].points);
+  let sum = 0, n = 0;
+  for (let i = 0; i < auto.M; i += 2) { sum += R.nearestOnArch(truth, auto.x[i], auto.y[i]).dist * vol.sx; n++; }
+  assert.ok(sum / n < 1, `mean distance ${(sum / n).toFixed(2)} mm`);
+  assert.ok(Math.abs(auto.length - truth.length) * vol.sx < 10, 'similar length');
+});
+
+test('reports no arch for a volume without teeth', async () => {
+  const { detectArch } = await import('../src/autoarch.js');
+  const vol = { data: new Uint16Array(64 * 64 * 40).fill(1000), nx: 64, ny: 64, nz: 40, sx: 0.5, sy: 0.5, sz: 0.5 };
+  assert.equal(detectArch(vol), null);
+});

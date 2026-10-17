@@ -33,7 +33,8 @@ The **?** button opens the user guide; the **ⓘ** button opens About, Privacy a
 ## Features
 
 - **Dental views**: panoramic reconstruction along the arch (adjustable slab thickness, average or MIP), cross-sections perpendicular to the arch, linked axial/coronal/sagittal slices and a 3D view (bone surface, teeth surface, MIP, simulated X-ray).
-- **CS 3D Imaging analyses**: when an export includes one, the arches and the traced inferior alveolar nerve canals are loaded and drawn on every view. For other scans, draw an arch by clicking along the teeth.
+- **Automatic arch**: scans without an analysis file get their dental arch found from the teeth, so the panoramic and cross-sections work as soon as the scan opens. You can also draw your own.
+- **CS 3D Imaging analyses**: when an export includes one, the arches and the traced inferior alveolar nerve canals are loaded and drawn on every view.
 - **Measurements**: distances in mm and angles, on any 2D view.
 - **PDF report**, created automatically on A4:
   - scan details, panoramic with the nerve canals, 3D and axial views;
@@ -63,7 +64,7 @@ The online version is served by GitHub Pages, which, like any web host, sees tha
 - DICOM CT series, one file per slice (with or without the `.dcm` extension) or a single multi-frame file.
 - Uncompressed transfer syntaxes: implicit and explicit VR little endian; 8- or 16-bit, signed or unsigned.
 - Character sets including UTF-8 and Greek (ISO 8859-7), so Greek patient names display correctly.
-- Tested with Carestream CS 8100 3D exports (CS 3D Imaging).
+- Tested with Carestream CS 8100 3D exports (CS 3D Imaging) and KaVo exports from the public [missing-teeth CBCT dataset](https://doi.org/10.57760/sciencedb.26465) (CC BY 4.0).
 
 Compressed DICOM (JPEG, JPEG 2000, JPEG-LS, RLE) is not supported yet; the viewer says so when it meets one. Most CBCT software can export uncompressed DICOM.
 
@@ -83,6 +84,7 @@ The tests generate their DICOM files in memory, so no patient data is needed or 
 |---|---|
 | `src/dicom.js` | DICOM parsing with input limits, series grouping, volume assembly, CS 3D Imaging analysis files |
 | `src/reslice.js` | Orthogonal, panoramic and cross-sectional reformatting |
+| `src/autoarch.js` | Finds the dental arch from the teeth when a scan has no analysis |
 | `src/viewport.js` | 2D view rendering, zoom/pan and input |
 | `src/vr.js` | WebGL2 ray-marched 3D rendering |
 | `src/report.js`, `src/pdf.js` | PDF report layout and a small PDF writer |
