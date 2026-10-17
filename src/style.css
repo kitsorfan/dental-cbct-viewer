@@ -575,7 +575,8 @@ body.dragging .drop-hint { display: grid; }
   .topbar.open .more { display: flex; }
   .more .group { flex-wrap: wrap; gap: 8px; padding: 10px 0 0; border-left: 0; border-top: 1px solid var(--line); }
   .more .group:first-child { padding-top: 0; border-top: 0; }
-  .more #preset, .more .lang { flex: 1; }
+  .more .lang { flex: 1; }
+  #preset { max-width: 8.5em; }
   .more .lang select { width: 100%; }
   #moreBtn { display: inline-flex; }
   #moreBtn[aria-expanded="true"] { background: var(--panel-3); border-color: var(--line-strong); }
@@ -586,6 +587,13 @@ body.dragging .drop-hint { display: grid; }
 @media (max-width: 899px), (max-height: 499px) {
   #openBtn { width: var(--control-h); padding: 0; }
   #openBtn span { display: none; }
+}
+
+/* Upright tablets: the patient and actions on the first row, tools and display controls on the second. */
+@media (min-width: 600px) and (max-width: 899px) and (min-height: 500px) {
+  .topbar { row-gap: 0; }
+  .topbar::after { content: ''; order: 9; flex-basis: 100%; } /* line break */
+  .tools, .display-group { order: 10; margin-top: 8px; }
 }
 
 /* Tablets in portrait: the panoramic across the top, the tall cross-section beside four views. */
@@ -616,6 +624,7 @@ body.dragging .drop-hint { display: grid; }
   .grid.max > .view:not(.maximized) { display: none; }
   .viewtabs { display: flex; }
 
+  .topbar .brand { display: none; } /* the controls need the room more than the logo */
   .report-group button { width: var(--control-h); padding: 0; }
   .report-group button span { display: none; }
   .patient strong + .details { display: none; }
@@ -628,8 +637,8 @@ body.dragging .drop-hint { display: grid; }
   .badge span { display: none; }
   .vctl label.range > span { display: none; }
 
-  /* An expanded view gets the screen: only the tools and the ⋯ menu stay, in one row. */
-  body.expanded .topbar > :not(.tools, .more, #moreBtn) { display: none; }
+  /* An expanded view gets the screen: only the tools, the display controls and the ⋯ menu stay. */
+  body.expanded .topbar > :not(.tools, .display-group, .more, #moreBtn) { display: none; }
   body.expanded #moreBtn { margin-left: auto; }
   body.expanded .viewtabs { display: none; }
   body.expanded .status { grid-column: 1 / -1; }
@@ -639,7 +648,8 @@ body.dragging .drop-hint { display: grid; }
 @media (max-width: 599px) {
   .topbar { gap: 8px; padding: 8px 10px; }
   .tools { order: 10; display: flex; flex: 1 0 100%; }
-  body.expanded .tools { order: 0; flex: 1 1 auto; }
+  .topbar .display-group { padding-left: 0; border-left: 0; }
+  #preset { width: 5.4em; padding: 0 24px 0 9px; background-position: right 7px center; }
   .tools button { flex: 1 1 0; width: auto; }
   .vhead { padding-left: 8px; }
 
