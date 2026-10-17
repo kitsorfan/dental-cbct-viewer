@@ -2,13 +2,57 @@
 // Voxel coordinates: x = column (patient left +), y = row (posterior +), z = slice (superior +).
 // Curved reformats assume square in-plane pixels (true for CBCT).
 
-export function axial(vol, z) {
+// Stored voxel values with their spacing in mm.
+export interface Volume {
+  data: Uint16Array;
+  nx: number;
+  ny: number;
+  nz: number;
+  sx: number;
+  sy: number;
+  sz: number;
+}
+
+// A 2D image cut from the volume: w × h pixels of sx × sy mm.
+export interface Plane {
+  w: number;
+  h: number;
+  sx: number;
+  sy: number;
+  data: Uint16Array;
+}
+
+// A cross-section also knows where it sits on the arch.
+export interface CrossPlane extends Plane {
+  half: number;
+  cx: number;
+  cy: number;
+  index: number;
+}
+
+// An arch resampled at 1-voxel steps: positions, unit tangents and buccal normals.
+export interface Arch {
+  M: number;
+  x: Float32Array;
+  y: Float32Array;
+  tx: Float32Array;
+  ty: Float32Array;
+  nx: Float32Array;
+  ny: Float32Array;
+  z: number;
+  length: number;
+}
+
+export type Point = number[];
+export type PanoMode = 'avg' | 'mip';
+
+export function axial(vol: Volume, z: number): Plane {
   const { nx, ny } = vol;
   const nxy = nx * ny;
   return { w: nx, h: ny, sx: vol.sx, sy: vol.sy, data: vol.data.subarray(z * nxy, (z + 1) * nxy) };
 }
 
-export function coronal(vol, y) {
+export function coronal(vol: Volume, y: number): Plane {
   const { nx, ny, nz, data } = vol;
   const nxy = nx * ny;
   const out = new Uint16Array(nx * nz);
@@ -19,7 +63,7 @@ export function coronal(vol, y) {
   return { w: nx, h: nz, sx: vol.sx, sy: vol.sz, data: out };
 }
 
-export function sagittal(vol, x) {
+export function sagittal(vol: Volume, x: number): Plane {
   const { nx, ny, nz, data } = vol;
   const nxy = nx * ny;
   const out = new Uint16Array(ny * nz);
@@ -33,7 +77,7 @@ export function sagittal(vol, x) {
 
 // Sample every z at a set of (x, y) column positions, optionally averaging or taking the max
 // over `thick` samples spread along (dx, dy). Output rows run superior -> inferior.
-export function columns(vol, xs, ys, dx, dy, thick, mode) {
+export function columns(vol: Volume, xs: Float32Array, ys: Float32Array, dx: Float32Array, dy: Float32Array, thick: number, mode: PanoMode) {
   const { nx, ny, nz, data } = vol;
   const nxy = nx * ny;
   const W = xs.length;
@@ -78,17 +122,17 @@ export function columns(vol, xs, ys, dx, dy, thick, mode) {
 }
 
 // Centripetal Catmull-Rom through control points ([x, y, z] arrays).
-export function spline(points, perSegment = 24) {
+export function spline(points: Point[], perSegment = 24): Point[] {
   const n = points.length;
   if (n < 2) return points.slice();
-  const P = (i) => {
+  const P = (i: number) => {
     if (i < 0) return points[0].map((v, k) => 2 * v - points[1][k]);
     if (i >= n) return points[n - 1].map((v, k) => 2 * v - points[n - 2][k]);
     return points[i];
   };
-  const dist = (a, b) => Math.max(1e-4, Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]) ** 0.5);
-  const lerp = (a, b, ta, tb, t) => a.map((v, k) => ((tb - t) * v + (t - ta) * b[k]) / (tb - ta));
-  const out = [];
+  const dist = (a: Point, b: Point) => Math.max(1e-4, Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]) ** 0.5);
+  const lerp = (a: Point, b: Point, ta: number, tb: number, t: number) => a.map((v, k) => ((tb - t) * v + (t - ta) * b[k]) / (tb - ta));
+  const out: Point[] = [];
   for (let s = 0; s < n - 1; s++) {
     const p0 = P(s - 1), p1 = P(s), p2 = P(s + 1), p3 = P(s + 2);
     const t0 = 0, t1 = t0 + dist(p0, p1), t2 = t1 + dist(p1, p2), t3 = t2 + dist(p2, p3);
@@ -105,7 +149,7 @@ export function spline(points, perSegment = 24) {
 
 // Resample an arch at 1-voxel arc-length steps, ordered patient-right -> patient-left,
 // with unit tangents and buccal (outward) normals in the axial plane.
-export function buildArch(controlPoints) {
+export function buildArch(controlPoints: Point[]): Arch {
   let pts = controlPoints.map((p) => [p[0], p[1], p[2] ?? 0]);
   if (pts[0][0] > pts[pts.length - 1][0]) pts = pts.reverse();
   const flat = pts.map((p) => [p[0], p[1], 0]);
@@ -151,7 +195,7 @@ export function buildArch(controlPoints) {
   return { M, x, y, tx, ty, nx, ny, z, length: total };
 }
 
-export function nearestOnArch(arch, px, py) {
+export function nearestOnArch(arch: Arch, px: number, py: number) {
   let best = 0, bestD = Infinity;
   for (let i = 0; i < arch.M; i++) {
     const d = (arch.x[i] - px) ** 2 + (arch.y[i] - py) ** 2;
@@ -160,7 +204,7 @@ export function nearestOnArch(arch, px, py) {
   return { index: best, dist: Math.sqrt(bestD) };
 }
 
-export function panoramic(vol, arch, offsetVox, thickVox, mode) {
+export function panoramic(vol: Volume, arch: Arch, offsetVox: number, thickVox: number, mode: PanoMode): Plane {
   const { M } = arch;
   const xs = new Float32Array(M), ys = new Float32Array(M);
   for (let i = 0; i < M; i++) {
@@ -171,7 +215,7 @@ export function panoramic(vol, arch, offsetVox, thickVox, mode) {
 }
 
 // Plane perpendicular to the arch at sample `index`; column 0 is buccal.
-export function crossSection(vol, arch, index, offsetVox, widthVox, thickVox) {
+export function crossSection(vol: Volume, arch: Arch, index: number, offsetVox: number, widthVox: number, thickVox: number): CrossPlane {
   const W = Math.max(8, Math.round(widthVox) | 1);
   const half = (W - 1) / 2;
   const i = Math.max(0, Math.min(arch.M - 1, index));
@@ -192,8 +236,8 @@ export function crossSection(vol, arch, index, offsetVox, widthVox, thickVox) {
 }
 
 // Where a 3D polyline crosses the plane f(p) = 0; returns interpolated points.
-export function crossings(poly, f) {
-  const hits = [];
+export function crossings(poly: Point[], f: (p: Point) => number): Point[] {
+  const hits: Point[] = [];
   let prev = f(poly[0]);
   for (let k = 1; k < poly.length; k++) {
     const cur = f(poly[k]);

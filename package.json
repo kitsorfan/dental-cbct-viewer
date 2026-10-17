@@ -6,11 +6,16 @@
   "type": "module",
   "license": "MIT",
   "scripts": {
-    "dev": "node scripts/serve.mjs",
-    "build": "node scripts/build.mjs",
-    "test": "node --test \"test/*.test.mjs\""
+    "dev": "node --disable-warning=ExperimentalWarning scripts/serve.ts",
+    "build": "node --disable-warning=ExperimentalWarning scripts/build.ts",
+    "test": "node --disable-warning=ExperimentalWarning --test \"test/*.test.ts\"",
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.node.json"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=24"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "typescript": "7.0.2"
   }
 }

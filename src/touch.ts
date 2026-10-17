@@ -3,30 +3,30 @@
 
 const TAP_MS = 300, TAP_MOVE = 10, DOUBLE_MS = 350, DOUBLE_DIST = 30;
 
+interface Finger { x: number; y: number; x0: number; y0: number; t0: number }
+
 export class Touches {
-  constructor() {
-    this.points = new Map();
-    this.lastTap = null;
-    this.multi = false; // a second finger joined the current gesture
-  }
+  points = new Map<number, Finger>();
+  lastTap: { x: number; y: number; t: number } | null = null;
+  multi = false; // a second finger joined the current gesture
 
   get count() {
     return this.points.size;
   }
 
-  down(e) {
+  down(e: PointerEvent) {
     if (!this.points.size) this.multi = false;
     this.points.set(e.pointerId, { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, t0: e.timeStamp });
     if (this.points.size > 1) this.multi = true;
   }
 
-  move(e) {
+  move(e: PointerEvent) {
     const p = this.points.get(e.pointerId);
     if (p) { p.x = e.clientX; p.y = e.clientY; }
   }
 
   // Forget a lifted finger. True when it completes a double-tap.
-  up(e) {
+  up(e: PointerEvent) {
     const p = this.points.get(e.pointerId);
     this.points.delete(e.pointerId);
     if (!p || this.multi || e.pointerType !== 'touch' || e.type !== 'pointerup') return false;
@@ -40,7 +40,7 @@ export class Touches {
 
   // Midpoint and spread of the first two fingers, in client pixels.
   pair() {
-    const [a, b] = this.points.values();
+    const [a, b] = [...this.points.values()];
     return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, dist: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)) };
   }
 }

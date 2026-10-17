@@ -1,0 +1,10 @@
+// Tests and build scripts run in Node; only they may use Node's APIs.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "types": ["node"]
+  },
+  "include": ["scripts", "test"]
+}

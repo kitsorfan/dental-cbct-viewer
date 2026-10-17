@@ -3,17 +3,24 @@ import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import vm from 'node:vm';
-import { STRINGS, LANGUAGES } from '../src/i18n.js';
-import { buildPdf } from '../src/pdf.js';
-import { makePhantom } from '../src/phantom.js';
-import { build } from '../scripts/build.mjs';
+import { STRINGS, LANGUAGES } from '../src/i18n.ts';
+import { buildPdf } from '../src/pdf.ts';
+import { makePhantom } from '../src/phantom.ts';
+import { build } from '../scripts/build.ts';
 
-const src = (f) => fs.readFileSync(new URL(`../src/${f}`, import.meta.url), 'utf8');
+const src = (f: string) => fs.readFileSync(new URL(`../src/${f}`, import.meta.url), 'utf8');
+
+// Every source module as one text, for checks that scan the code.
+function sources() {
+  const files = fs.readdirSync(new URL('../src/', import.meta.url)).filter((f) => f.endsWith('.ts'));
+  assert.ok(files.length >= 10, `found the source modules (${files.length})`);
+  return files.map(src).join('\n');
+}
 
 test('every language defines the same strings, placeholders and list items', () => {
   assert.deepEqual(LANGUAGES.map((l) => l.id).sort(), Object.keys(STRINGS).sort());
-  const vars = (s) => [...s.matchAll(/\{(\w+)\}/g)].map((m) => m[1]).sort().join();
-  const items = (s) => (s.match(/<li>/g) || []).length;
+  const vars = (s: string) => [...s.matchAll(/\{(\w+)\}/g)].map((m) => m[1]).sort().join();
+  const items = (s: string) => (s.match(/<li>/g) || []).length;
   const keys = Object.keys(STRINGS.en).sort();
   for (const lang of Object.keys(STRINGS)) {
     assert.deepEqual(Object.keys(STRINGS[lang]).sort(), keys, `${lang} keys`);
@@ -25,7 +32,7 @@ test('every language defines the same strings, placeholders and list items', () 
 });
 
 test('every string key used in the code and markup exists', () => {
-  const code = fs.readdirSync(new URL('../src/', import.meta.url)).filter((f) => f.endsWith('.js')).map(src).join('\n');
+  const code = sources();
   const html = fs.readFileSync(new URL('../index.html', import.meta.url), 'utf8');
   const used = new Set([
     ...[...code.matchAll(/\bt\('([\w.]+)'/g)].map((m) => m[1]),
@@ -36,7 +43,7 @@ test('every string key used in the code and markup exists', () => {
 });
 
 test('nothing is written to browser storage', () => {
-  const code = fs.readdirSync(new URL('../src/', import.meta.url)).filter((f) => f.endsWith('.js')).map(src).join('\n');
+  const code = sources();
   assert.doesNotMatch(code, /localStorage\.setItem|sessionStorage\.setItem|document\.cookie\s*=|indexedDB\.open|caches\.open/);
 });
 
@@ -46,7 +53,7 @@ test('the PDF writer produces a valid cross-reference table', async () => {
   const text = Buffer.from(await blob.arrayBuffer()).toString('latin1');
   assert.ok(text.startsWith('%PDF-1.4'));
   assert.match(text, /\/Count 2/);
-  const startxref = Number(text.match(/startxref\n(\d+)/)[1]);
+  const startxref = Number(text.match(/startxref\n(\d+)/)?.[1]);
   assert.equal(text.slice(startxref, startxref + 4), 'xref');
   const offsets = [...text.slice(startxref).matchAll(/^(\d{10}) 00000 n $/gm)].map((m) => Number(m[1]));
   offsets.forEach((offset, i) => assert.ok(text.startsWith(`${i + 1} 0 obj`, offset), `object ${i + 1}`));
@@ -58,6 +65,7 @@ test('the demo phantom has teeth, a metal crown and an analysis', () => {
   assert.deepEqual(meta.dims, [80, 80, 50]);
   assert.equal(data.length, 80 * 80 * 50);
   assert.ok(meta.max > 9000, 'metal crown');
+  assert.ok(meta.analysis);
   assert.equal(meta.analysis.arches.length, 1);
   assert.equal(meta.analysis.canals.length, 2);
   assert.ok(meta.demo);
@@ -68,11 +76,12 @@ test('the single-file build compiles and only its own script may run', () => {
   const html = fs.readFileSync(out, 'utf8');
   assert.match(html, /data-build="bundle"/);
   assert.doesNotMatch(html, /src="src\//);
-  const script = html.match(/<script>([\s\S]*)<\/script>/)[1];
+  const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1];
+  assert.ok(script, 'inline script');
   assert.doesNotMatch(script, /^\s*(import|export)\s/m);
   assert.doesNotThrow(() => new vm.Script(script));
 
-  const csp = html.match(/http-equiv="Content-Security-Policy" content="([^"]+)"/)[1];
+  const csp = html.match(/http-equiv="Content-Security-Policy" content="([^"]+)"/)?.[1] ?? '';
   const hash = crypto.createHash('sha256').update(script, 'utf8').digest('base64');
   assert.ok(csp.includes(`script-src 'sha256-${hash}'`), 'script hash matches the policy');
   for (const rule of ["default-src 'none'", "connect-src 'none'", "form-action 'none'", "base-uri 'none'"]) assert.ok(csp.includes(rule), rule);

@@ -1,10 +1,11 @@
 // WebGL2 ray-marched volume rendering (iso-surface, MIP, simulated X-ray).
 // World axes match voxel axes: +x patient left, +y posterior, +z superior.
 
-import { Touches } from './touch.js';
+import { Touches } from './touch.ts';
+import type { Volume } from './reslice.ts';
 
 const MIN_DIST = 0.8, MAX_DIST = 6;
-const clampDist = (d) => Math.min(MAX_DIST, Math.max(MIN_DIST, d));
+const clampDist = (d: number) => Math.min(MAX_DIST, Math.max(MIN_DIST, d));
 
 const VS = `#version 300 es
 out vec2 vNdc;
@@ -99,12 +100,14 @@ void main() {
   frag = vec4(mix(bg, vec3(1.0), g), 1.0);
 }`;
 
-function perspective(fovy, aspect, near, far) {
+type Mat4 = number[];
+
+function perspective(fovy: number, aspect: number, near: number, far: number): Mat4 {
   const f = 1 / Math.tan(fovy / 2), nf = 1 / (near - far);
   return [f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, (far + near) * nf, -1, 0, 0, 2 * far * near * nf, 0];
 }
 
-function lookAt(eye, center, up) {
+function lookAt(eye: number[], center: number[], up: number[]): Mat4 {
   let zx = eye[0] - center[0], zy = eye[1] - center[1], zz = eye[2] - center[2];
   let l = Math.hypot(zx, zy, zz); zx /= l; zy /= l; zz /= l;
   let xx = up[1] * zz - up[2] * zy, xy = up[2] * zx - up[0] * zz, xz = up[0] * zy - up[1] * zx;
@@ -116,15 +119,15 @@ function lookAt(eye, center, up) {
     -(zx * eye[0] + zy * eye[1] + zz * eye[2]), 1];
 }
 
-function multiply(a, b) {
-  const o = new Array(16);
+function multiply(a: Mat4, b: Mat4): Mat4 {
+  const o = new Array<number>(16);
   for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) {
     o[c * 4 + r] = a[r] * b[c * 4] + a[4 + r] * b[c * 4 + 1] + a[8 + r] * b[c * 4 + 2] + a[12 + r] * b[c * 4 + 3];
   }
   return o;
 }
 
-function invert(m) {
+function invert(m: Mat4): Mat4 {
   const [a00, a01, a02, a03, a10, a11, a12, a13, a20, a21, a22, a23, a30, a31, a32, a33] = m;
   const b00 = a00 * a11 - a01 * a10, b01 = a00 * a12 - a02 * a10, b02 = a00 * a13 - a03 * a10;
   const b03 = a01 * a12 - a02 * a11, b04 = a01 * a13 - a03 * a11, b05 = a02 * a13 - a03 * a12;
@@ -143,25 +146,61 @@ function invert(m) {
   ];
 }
 
+const UNIFORMS = ['uVol', 'uInv', 'uHalf', 'uTexel', 'uIso', 'uMode', 'uStep', 'uGain'] as const;
+type Uniform = typeof UNIFORMS[number];
+
+export interface VolumeHooks {
+  dblclick(view: VolumeView, e: Event): void;
+}
+
 export class VolumeView {
-  constructor(el, hooks) {
+  el: HTMLElement;
+  hooks: VolumeHooks;
+  wrap: HTMLElement;
+  canvas: HTMLCanvasElement;
+  gl: WebGL2RenderingContext | null;
+  // Why the view cannot render, as an err.* string key; null when it works.
+  failed: string | null = null;
+  mode = 0; // 0 iso-surface, 1 MIP, 2 simulated X-ray
+  iso = 0.4;
+  gain = 6;
+  yaw!: number;
+  pitch!: number;
+  dist!: number;
+  ready = false;
+  pending = 0;
+  settle?: ReturnType<typeof setTimeout>;
+  // Set up by init() and setVolume(), before anything is drawn.
+  prog!: WebGLProgram;
+  vao!: WebGLVertexArrayObject;
+  u = {} as Record<Uniform, WebGLUniformLocation | null>;
+  texture: WebGLTexture | null = null;
+  half!: number[];
+  texel!: number[];
+  stepWorld!: number;
+
+  constructor(el: HTMLElement, hooks: VolumeHooks) {
     this.el = el;
     this.hooks = hooks;
-    this.wrap = el.querySelector('.canvas-wrap');
-    this.canvas = this.wrap.querySelector('canvas');
-    this.gl = this.canvas.getContext('webgl2', { antialias: false, preserveDrawingBuffer: true });
-    this.mode = 0;
-    this.iso = 0.4;
-    this.gain = 6;
+    const wrap = el.querySelector<HTMLElement>('.canvas-wrap');
+    const canvas = wrap?.querySelector('canvas');
+    if (!wrap || !canvas) throw new Error('The 3D view has no canvas');
+    this.wrap = wrap;
+    this.canvas = canvas;
+    this.gl = canvas.getContext('webgl2', { antialias: false, preserveDrawingBuffer: true });
     this.reset();
-    this.ready = false;
-    this.pending = 0;
     if (!this.gl) {
       this.failed = 'webgl';
       return;
     }
-    this.init();
-    new ResizeObserver(() => this.resize()).observe(this.wrap);
+    try {
+      this.init(this.gl);
+    } catch (err) {
+      console.error(err);
+      this.failed = 'webgl';
+      return;
+    }
+    new ResizeObserver(() => this.resize()).observe(wrap);
     this.bind();
   }
 
@@ -171,31 +210,29 @@ export class VolumeView {
     this.dist = 2.1;
   }
 
-  init() {
-    const gl = this.gl;
-    const compile = (type, src) => {
+  init(gl: WebGL2RenderingContext) {
+    const compile = (type: number, src: string) => {
       const s = gl.createShader(type);
+      if (!s) throw new Error('Could not create a shader');
       gl.shaderSource(s, src);
       gl.compileShader(s);
-      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s) ?? 'Shader error');
       return s;
     };
     const prog = gl.createProgram();
     gl.attachShader(prog, compile(gl.VERTEX_SHADER, VS));
     gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FS));
     gl.linkProgram(prog);
-    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog) ?? 'Link error');
     this.prog = prog;
-    this.u = {};
-    for (const name of ['uVol', 'uInv', 'uHalf', 'uTexel', 'uIso', 'uMode', 'uStep', 'uGain']) {
-      this.u[name] = gl.getUniformLocation(prog, name);
-    }
+    for (const name of UNIFORMS) this.u[name] = gl.getUniformLocation(prog, name);
     this.vao = gl.createVertexArray();
   }
 
   // Downsample to <= ~300 voxels per axis and quantise to 8 bits over [lo, hi] stored values.
-  setVolume(vol, lo, hi) {
-    if (!this.gl) return;
+  setVolume(vol: Volume, lo: number, hi: number) {
+    const gl = this.gl;
+    if (!gl) return;
     const { nx, ny, nz, data } = vol;
     const f = Math.max(1, Math.ceil(Math.max(nx, ny, nz) / 300));
     const dx = Math.floor(nx / f), dy = Math.floor(ny / f), dz = Math.floor(nz / f);
@@ -220,7 +257,6 @@ export class VolumeView {
         }
       }
     }
-    const gl = this.gl;
     if (this.texture) gl.deleteTexture(this.texture);
     this.texture = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_3D, this.texture);
@@ -242,8 +278,8 @@ export class VolumeView {
 
   // Forget the volume (closing a scan): free the GPU texture and blank the canvas.
   clear() {
-    if (!this.gl) return;
     const gl = this.gl;
+    if (!gl) return;
     if (this.texture) gl.deleteTexture(this.texture);
     this.texture = null;
     this.ready = false;
@@ -252,7 +288,7 @@ export class VolumeView {
   }
 
   // Render at an exact pixel size into a new 2D canvas (for exports), then restore.
-  snapshot(width, height) {
+  snapshot(width: number, height: number) {
     if (!this.ready) return null;
     const c = this.canvas;
     const [w0, h0] = [c.width, c.height];
@@ -262,7 +298,7 @@ export class VolumeView {
     const out = document.createElement('canvas');
     out.width = c.width;
     out.height = c.height;
-    out.getContext('2d').drawImage(c, 0, 0);
+    out.getContext('2d')!.drawImage(c, 0, 0);
     c.width = w0;
     c.height = h0;
     this.draw(false);
@@ -287,8 +323,9 @@ export class VolumeView {
     }
   }
 
-  draw(fast) {
+  draw(fast: boolean) {
     const gl = this.gl;
+    if (!gl) return;
     const w = this.canvas.width, h = this.canvas.height;
     gl.viewport(0, 0, w, h);
     gl.useProgram(this.prog);
@@ -314,7 +351,9 @@ export class VolumeView {
   bind() {
     const c = this.canvas;
     const touches = new Touches();
-    let drag = null, pinch = null, pointerType = 'mouse';
+    let drag: { x: number; y: number; button: number } | null = null;
+    let pinch: { spread: number; dist: number } | null = null;
+    let pointerType = 'mouse';
     const startPinch = () => { pinch = { spread: touches.pair().dist, dist: this.dist }; };
     c.addEventListener('contextmenu', (e) => e.preventDefault());
     c.addEventListener('pointerdown', (e) => {
@@ -348,7 +387,7 @@ export class VolumeView {
       }
       this.render(true);
     });
-    const release = (e) => {
+    const release = (e: PointerEvent) => {
       const double = touches.up(e);
       drag = null;
       if (pinch) {

@@ -1,9 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { scanEntries, loadSeries, parseAnalysis, DicomError } from '../src/dicom.js';
-import { writeDicom, ctSlice, fileEntry } from './dicom-writer.mjs';
+import { scanEntries, loadSeries, parseAnalysis, DicomError } from '../src/dicom.ts';
+import { writeDicom, ctSlice, fileEntry } from './dicom-writer.ts';
+import type { DicomElement, SliceOptions, WriteOptions } from './dicom-writer.ts';
 
-const slices = (zs, opts = {}) => zs.map((z, i) => fileEntry(
+const code = (c: string) => (err: unknown) => err instanceof DicomError && err.code === c;
+
+const slices = (zs: number[], opts: SliceOptions & { write?: WriteOptions } = {}) => zs.map((z, i) => fileEntry(
   writeDicom(ctSlice({ z, instance: i + 1, ...opts }), opts.write), `scan/Data/slice${i}.dcm`));
 
 test('reads an explicit VR series and sorts slices by position', async () => {
@@ -22,7 +25,7 @@ test('reads an explicit VR series and sorts slices by position', async () => {
 });
 
 test('decodes UTF-8 names (ISO_IR 192)', async () => {
-  const extra = [[0x00100010, 'PN', 'ΠΑΠΑΔΟΠΟΥΛΟΣ^ΓΙΩΡΓΟΣ']];
+  const extra: DicomElement[] = [[0x00100010, 'PN', 'ΠΑΠΑΔΟΠΟΥΛΟΣ^ΓΙΩΡΓΟΣ']];
   const [s] = await scanEntries(slices([0, 1], { extra }));
   assert.equal(s.patientName, 'ΠΑΠΑΔΟΠΟΥΛΟΣ ΓΙΩΡΓΟΣ');
 });
@@ -42,14 +45,14 @@ test('shifts signed pixels and keeps Hounsfield values', async () => {
 });
 
 test('skips undefined-length sequences before the pixel data', async () => {
-  const extra = [[0x00091010, 'SQ', [[[0x00091011, 'LO', 'private'], [0x00091012, 'SQ', [[[0x00091013, 'LO', 'nested']]]]]]]];
+  const extra: DicomElement[] = [[0x00091010, 'SQ', [[[0x00091011, 'LO', 'private'], [0x00091012, 'SQ', [[[0x00091013, 'LO', 'nested']]]]]]]];
   const [s] = await scanEntries(slices([0, 1], { extra }));
   const { data } = await loadSeries(s);
   assert.equal(data[13], 101);
 });
 
 test('reads headers larger than the first 64 KB', async () => {
-  const extra = [[0x00091020, 'OB', new Uint8Array(100_000)]];
+  const extra: DicomElement[] = [[0x00091020, 'OB', new Uint8Array(100_000)]];
   const [s] = await scanEntries(slices([0, 1], { extra }));
   const { data } = await loadSeries(s);
   assert.equal(data[12], 100);
@@ -58,8 +61,8 @@ test('reads headers larger than the first 64 KB', async () => {
 test('reads multi-frame images using per-frame positions', async () => {
   const rows = 2, cols = 2;
   const pixels = new Uint16Array([...Array(4).fill(30), ...Array(4).fill(10), ...Array(4).fill(20)]);
-  const frame = (z) => [[0x00209113, 'SQ', [[[0x00200032, 'DS', `0\\0\\${z}`]]]]];
-  const extra = [
+  const frame = (z: number): DicomElement[] => [[0x00209113, 'SQ', [[[0x00200032, 'DS', `0\\0\\${z}`]]]]];
+  const extra: DicomElement[] = [
     [0x00280008, 'IS', '3'],
     [0x00280030, 'DS', '0.3\\0.3'],
     [0x52009229, 'SQ', [[[0x00289110, 'SQ', [[[0x00180050, 'DS', '0.3']]]]]]],
@@ -89,7 +92,7 @@ test('groups different series separately, largest first', async () => {
 });
 
 test('reports compressed transfer syntaxes by name', async () => {
-  const elements = ctSlice().map((e) => (e[0] === 0x7fe00010 ? [0x7fe00010, 'OB', null, { undefinedLength: true }] : e));
+  const elements = ctSlice().map((e): DicomElement => (e[0] === 0x7fe00010 ? [0x7fe00010, 'OB', '', { undefinedLength: true }] : e));
   const entry = fileEntry(writeDicom(elements, { transfer: '1.2.840.10008.1.2.4.90' }), 'j2k.dcm');
   await assert.rejects(scanEntries([entry]), (err) => err instanceof DicomError && err.code === 'compressed' && err.detail === 'JPEG 2000 Lossless');
 });
@@ -97,27 +100,27 @@ test('reports compressed transfer syntaxes by name', async () => {
 test('attaches the analysis whose Reference matches the series', async () => {
   const entries = slices([0, 1], { series: '9.9.9' });
   entries.push(fileEntry(new TextEncoder().encode('<trophy type="itoothcontext"/>'), 'scan/Data/Analyses/a.xml'));
-  const fakeParse = () => ({ reference: '9.9.9', name: 'Analysis', arches: [], canals: [] });
+  const fakeParse = () => ({ reference: '9.9.9', name: 'Analysis', arches: [], canals: [], lut: null, ortho: null });
   const [s] = await scanEntries(entries, null, fakeParse);
   assert.equal(s.analysis?.name, 'Analysis');
 });
 
 test('rejects folders without images', async () => {
   const entries = [fileEntry(new TextEncoder().encode('hello'), 'notes.txt')];
-  await assert.rejects(scanEntries(entries), (err) => err.code === 'noImages');
+  await assert.rejects(scanEntries(entries), code('noImages'));
 });
 
 test('rejects implausible image sizes before allocating anything', async () => {
-  const extra = [[0x00280010, 'US', 60000], [0x00280011, 'US', 60000]];
+  const extra: DicomElement[] = [[0x00280010, 'US', 60000], [0x00280011, 'US', 60000]];
   const entry = fileEntry(writeDicom(ctSlice({ extra })), 'huge.dcm');
-  await assert.rejects(scanEntries([entry]), (err) => err.code === 'dims');
+  await assert.rejects(scanEntries([entry]), code('dims'));
 });
 
 test('rejects absurdly deep nesting', async () => {
-  let item = [[0x00091011, 'LO', 'x']];
+  let item: DicomElement[] = [[0x00091011, 'LO', 'x']];
   for (let i = 0; i < 40; i++) item = [[0x00091010, 'SQ', [item]]];
   const entry = fileEntry(writeDicom(ctSlice({ extra: item })), 'deep.dcm');
-  await assert.rejects(scanEntries([entry]), (err) => err.code === 'invalid');
+  await assert.rejects(scanEntries([entry]), code('invalid'));
 });
 
 test('reports garbage files as damaged rather than crashing', async () => {
@@ -129,7 +132,7 @@ test('reports garbage files as damaged rather than crashing', async () => {
 
 test('refuses to open an unreasonable number of files', async () => {
   const entries = Array.from({ length: 20001 }, (_, i) => ({ file: new File([], `f${i}`), path: `f${i}` }));
-  await assert.rejects(scanEntries(entries), (err) => err.code === 'tooMany');
+  await assert.rejects(scanEntries(entries), code('tooMany'));
 });
 
 test('ignores analysis files that declare a DTD or entities', () => {

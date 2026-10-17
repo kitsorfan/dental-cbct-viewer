@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import * as R from '../src/reslice.js';
+import * as R from '../src/reslice.ts';
 
 // Volume whose value at (x, y, z) is x + 10*y + 100*z.
 function rampVolume(nx = 8, ny = 6, nz = 5) {
@@ -56,14 +56,15 @@ test('crossings interpolates where a polyline meets a plane', () => {
 });
 
 test('finds the dental arch automatically on the demo jaw', async () => {
-  const { makePhantom } = await import('../src/phantom.js');
-  const { detectArch } = await import('../src/autoarch.js');
+  const { makePhantom } = await import('../src/phantom.ts');
+  const { detectArch } = await import('../src/autoarch.ts');
   const { meta, data } = makePhantom({ voxelsPerMm: 2 });
   const [nx, ny, nz] = meta.dims;
   const vol = { data, nx, ny, nz, sx: meta.spacing[0], sy: meta.spacing[1], sz: meta.spacing[2] };
   const found = detectArch(vol);
   assert.ok(found, 'arch found');
   const auto = R.buildArch(found.points);
+  assert.ok(meta.analysis);
   const truth = R.buildArch(meta.analysis.arches[0].points);
   let sum = 0, n = 0;
   for (let i = 0; i < auto.M; i += 2) { sum += R.nearestOnArch(truth, auto.x[i], auto.y[i]).dist * vol.sx; n++; }
@@ -72,7 +73,7 @@ test('finds the dental arch automatically on the demo jaw', async () => {
 });
 
 test('reports no arch for a volume without teeth', async () => {
-  const { detectArch } = await import('../src/autoarch.js');
+  const { detectArch } = await import('../src/autoarch.ts');
   const vol = { data: new Uint16Array(64 * 64 * 40).fill(1000), nx: 64, ny: 64, nz: 40, sx: 0.5, sy: 0.5, sz: 0.5 };
   assert.equal(detectArch(vol), null);
 });

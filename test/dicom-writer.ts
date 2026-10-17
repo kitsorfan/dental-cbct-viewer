@@ -4,37 +4,52 @@ const LONG_VRS = new Set(['OB', 'OD', 'OF', 'OL', 'OV', 'OW', 'SQ', 'SV', 'UC', 
 const UNDEF = 0xffffffff;
 const utf8 = new TextEncoder();
 
-function concat(parts) {
+// One element: [tag, VR, value, options]. A value is text, a US number, a typed array, or for SQ
+// a list of items, each an element list. { undefinedLength: true } marks encapsulated data.
+export type DicomElement = [tag: number, vr: string, value: Value, opts?: { undefinedLength?: boolean }];
+type Value = string | number | ArrayBufferView | DicomElement[][];
+
+export interface WriteOptions { transfer?: string; preamble?: boolean }
+export interface SliceOptions {
+  rows?: number;
+  cols?: number;
+  z?: number;
+  instance?: number;
+  series?: string;
+  pixels?: Uint16Array | Int16Array;
+  signed?: boolean;
+  extra?: DicomElement[];
+}
+
+function concat(parts: Uint8Array[]) {
   const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
   let o = 0;
   for (const p of parts) { out.set(p, o); o += p.length; }
   return out;
 }
 
-function u16(v) { const b = new Uint8Array(2); new DataView(b.buffer).setUint16(0, v, true); return b; }
-function u32(v) { const b = new Uint8Array(4); new DataView(b.buffer).setUint32(0, v, true); return b; }
-function tagBytes(tag) { return concat([u16(tag >>> 16), u16(tag & 0xffff)]); }
+function u16(v: number) { const b = new Uint8Array(2); new DataView(b.buffer).setUint16(0, v, true); return b; }
+function u32(v: number) { const b = new Uint8Array(4); new DataView(b.buffer).setUint32(0, v, true); return b; }
+function tagBytes(tag: number) { return concat([u16(tag >>> 16), u16(tag & 0xffff)]); }
 
-function valueBytes(vr, value) {
+function valueBytes(vr: string, value: Value): Uint8Array {
   if (value instanceof Uint8Array) return value;
   if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-  if (vr === 'US') return u16(value);
+  if (vr === 'US') return u16(Number(value));
   let b = utf8.encode(String(value));
   if (b.length % 2) b = concat([b, new Uint8Array([vr === 'UI' ? 0 : 0x20])]);
   return b;
 }
 
-// elements: [tag, vr, value] where value is a string, number (US), typed array, or for SQ
-// an array of items (each an element list). { undefinedLength: true } marks encapsulated data.
-function encode(elements, explicit) {
-  const parts = [];
+function encode(elements: DicomElement[], explicit: boolean): Uint8Array {
+  const parts: Uint8Array[] = [];
   for (const [tag, vr, value, opts = {}] of elements) {
     const group = tag >>> 16;
     const asExplicit = explicit || group === 0x0002;
-    let body;
-    let length;
+    let body: Uint8Array;
+    let length: number;
     if (vr === 'SQ') {
-      const items = value.map((item) => concat([tagBytes(0xfffee000), u32(UNDEF), encode(item, explicit), tagBytes(0xfffee00d), u32(0)]));
+      const items = (value as DicomElement[][]).map((item) => concat([tagBytes(0xfffee000), u32(UNDEF), encode(item, explicit), tagBytes(0xfffee00d), u32(0)]));
       body = concat([...items, tagBytes(0xfffee0dd), u32(0)]);
       length = UNDEF;
     } else if (opts.undefinedLength) {
@@ -55,7 +70,7 @@ function encode(elements, explicit) {
   return concat(parts);
 }
 
-export function writeDicom(elements, { transfer = '1.2.840.10008.1.2.1', preamble = true } = {}) {
+export function writeDicom(elements: DicomElement[], { transfer = '1.2.840.10008.1.2.1', preamble = true }: WriteOptions = {}) {
   const explicit = transfer !== '1.2.840.10008.1.2';
   const meta = encode([[0x00020010, 'UI', transfer]], true);
   const dataset = encode(elements.slice().sort((a, b) => (a[0] >>> 0) - (b[0] >>> 0)), explicit);
@@ -64,10 +79,11 @@ export function writeDicom(elements, { transfer = '1.2.840.10008.1.2.1', preambl
 }
 
 // A typical single-frame CT slice; override or add elements through `extra`.
-export function ctSlice({ rows = 4, cols = 3, z = 0, instance = 1, series = '1.2.3', pixels, signed = false, extra = [] } = {}) {
+export function ctSlice({ rows = 4, cols = 3, z = 0, instance = 1, series = '1.2.3', pixels, signed = false, extra = [] }: SliceOptions = {}) {
   const n = rows * cols;
-  const px = pixels ?? (signed ? new Int16Array(n) : new Uint16Array(n)).map((_, i) => i + z * 100);
-  const base = [
+  const ramp = (_: number, i: number) => i + z * 100;
+  const px = pixels ?? (signed ? new Int16Array(n).map(ramp) : new Uint16Array(n).map(ramp));
+  const base: DicomElement[] = [
     [0x00080005, 'CS', 'ISO_IR 192'],
     [0x00080020, 'DA', '20261012'],
     [0x00080060, 'CS', 'CT'],
@@ -90,6 +106,6 @@ export function ctSlice({ rows = 4, cols = 3, z = 0, instance = 1, series = '1.2
   return [...base.filter((e) => !tags.has(e[0])), ...extra];
 }
 
-export function fileEntry(bytes, path) {
-  return { file: new File([bytes], path.split('/').pop()), path };
+export function fileEntry(bytes: Uint8Array<ArrayBuffer>, path: string) {
+  return { file: new File([bytes], path.split('/').pop() ?? path), path };
 }

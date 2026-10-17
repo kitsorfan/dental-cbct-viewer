@@ -1,16 +1,33 @@
-import { Viewport } from './viewport.js';
-import { VolumeView } from './vr.js';
-import * as R from './reslice.js';
-import { scanEntries, loadSeries, entriesFromDrop, entriesFromInput } from './dicom.js';
-import { expandArchives } from './zip.js';
-import { makePhantom } from './phantom.js';
-import { detectArch } from './autoarch.js';
-import { createReport, CSS_PER_MM, PIXEL_RATIO } from './report.js';
-import { drawLogo } from './brand.js';
-import { t, setLanguage, detectLanguage, getLanguage, LANGUAGES, localeFor, rememberLanguageInUrl } from './i18n.js';
+import { Viewport } from './viewport.ts';
+import type { Pos, RenderExtras, ViewHooks, ViewKind } from './viewport.ts';
+import { VolumeView } from './vr.ts';
+import * as R from './reslice.ts';
+import type { Arch, CrossPlane, PanoMode, Plane, Point, Volume } from './reslice.ts';
+import { DicomError, scanEntries, loadSeries, entriesFromDrop, entriesFromInput } from './dicom.ts';
+import type { Entry, ScanMeta, Series } from './dicom.ts';
+import { expandArchives } from './zip.ts';
+import { makePhantom } from './phantom.ts';
+import { detectArch } from './autoarch.ts';
+import { createReport, CSS_PER_MM, PIXEL_RATIO } from './report.ts';
+import type { CrossItem, ReportInput, Tile } from './report.ts';
+import { drawLogo } from './brand.ts';
+import { t, setLanguage, detectLanguage, getLanguage, LANGUAGES, localeFor, rememberLanguageInUrl } from './i18n.ts';
+import type { Vars } from './i18n.ts';
 
-const $ = (sel) => document.querySelector(sel);
-const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+declare global {
+  interface Window {
+    __viewerReady?: boolean; // for automated checks: the scan and the 3D view are ready
+  }
+}
+
+// Elements of the page itself: a missing one is a bug in index.html, so fail loudly.
+function find<T extends Element = HTMLElement>(root: ParentNode, sel: string): T {
+  const el = root.querySelector<T>(sel);
+  if (!el) throw new Error(`Missing element: ${sel}`);
+  return el;
+}
+const $ = <T extends Element = HTMLElement>(sel: string) => find<T>(document, sel);
+const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 
 const REPO_URL = 'https://github.com/kitsorfan/dental-cbct-viewer';
 const CREATOR = 'Kitsos Orfanopoulos';
@@ -18,35 +35,116 @@ const CREATOR = 'Kitsos Orfanopoulos';
 const DEMO_SCAN = { url: `${REPO_URL}/releases/download/demo-data/dental-cbct-demo-kavo.zip`, size: '91 MB' };
 const CROSS_STEPS = [0.5, 1, 2, 5]; // mm
 const LEGACY_STORAGE_KEYS = ['dental-cbct-viewer.lang']; // written by v1.0.0, removed on start
-const KINDS_2D = ['pano', 'axial', 'cross', 'coronal', 'sagittal'];
-const COLORS = {
+const KINDS_2D: ViewKind[] = ['pano', 'axial', 'cross', 'coronal', 'sagittal'];
+const COLORS: Record<ViewKind | 'vr' | 'measure', string> = {
   axial: '#4ea1ff', coronal: '#3fd08f', sagittal: '#ff9f43',
   pano: '#f2cf4a', cross: '#ff5fa8', vr: '#2ec4b6', measure: '#7ef0ff',
 };
 // [left, right, top, bottom]
-const EDGE_LABELS = {
+const EDGE_LABELS: Record<ViewKind, string[]> = {
   axial: ['R', 'L', 'A', 'P'],
   coronal: ['R', 'L', 'S', 'I'],
   sagittal: ['A', 'P', 'S', 'I'],
   pano: ['R', 'L', 'S', 'I'],
   cross: ['edge.buccal', 'edge.lingual', 'S', 'I'],
 };
-const PRESETS = {
+const PRESETS: Record<string, { c: number; w: number }> = {
   bone: { c: 1300, w: 3000 },
   teeth: { c: 1900, w: 2600 },
   soft: { c: 150, w: 1000 },
   scanner: { c: 1048, w: 4096 },
   auto: { c: 0, w: 0 },
 };
-const VR_PRESETS = {
+const VR_PRESETS: Record<string, { mode: number; hu?: number; level?: number }> = {
   bone: { mode: 0, hu: 800 },
   teeth: { mode: 0, hu: 2300 },
   mip: { mode: 1, hu: 400 },
   xray: { mode: 2, level: 0.3 },
 };
+const TOOL_KEYS: Record<string, string> = { n: 'navigate', k: 'scroll', w: 'wl', p: 'pan', z: 'zoom', m: 'measure', l: 'angle', a: 'arch' };
 
-const S = {
-  series: [], // { id, label, local }
+// A scan's voxels with what is needed to turn them into Hounsfield units.
+interface ScanVolume extends Volume {
+  slope: number;
+  intercept: number;
+  max: number;
+}
+
+interface Distance {
+  type: 'distance';
+  kind: ViewKind;
+  key: string | null;
+  a: number[];
+  b: number[];
+  sx: number;
+  sy: number;
+}
+
+interface Angle {
+  type: 'angle';
+  kind: ViewKind;
+  key: string | null;
+  pts: number[][];
+  sx: number;
+  sy: number;
+}
+
+type Measure = Distance | Angle;
+
+interface ArchEntry {
+  type: string;
+  points: Point[];
+  name?: string;
+  demo?: boolean;
+  auto?: boolean;
+  custom?: number;
+  built?: Arch;
+}
+
+interface Canal {
+  name: string;
+  radiusMm: number;
+  radiusVox: number;
+  css: string;
+  dense: Point[];
+  proj: (number[] | null)[] | null;
+}
+
+interface State {
+  series: { id: string; label: string; local: Series }[];
+  meta: ScanMeta | null;
+  vol: ScanVolume | null;
+  cursor: number[];
+  wl: { c: number; w: number };
+  invert: boolean;
+  lut: Uint32Array | null;
+  tool: string;
+  showCanals: boolean;
+  showGuides: boolean;
+  arches: ArchEntry[];
+  archIdx: number;
+  arch: Arch | null;
+  panoOffset: number;
+  panoThick: number;
+  panoMode: PanoMode;
+  csIndex: number;
+  csMm: number;
+  csStep: number;
+  csWidth: number;
+  canals: Canal[];
+  measures: Measure[];
+  measuring: Distance | null;
+  angleDraft: Angle | null;
+  angleHover: number[] | null;
+  drawing: Point[] | null;
+  drawHover: Pos | null;
+  hoverKind: ViewKind | null;
+  vrRange: number[];
+  message: { key: string; vars: Vars | (() => Vars) } | null;
+}
+
+const S: State = {
+  series: [],
   meta: null,
   vol: null,
   cursor: [0, 0, 0],
@@ -78,15 +176,15 @@ const S = {
   message: null,
 };
 
-const views = {};
-let vr = null;
+const views = {} as Record<ViewKind, Viewport>;
+let vr: VolumeView | null = null;
 
 // ---------------------------------------------------------------- rendering loop
 
-const dirty = new Set();
+const dirty = new Set<ViewKind>();
 let frame = 0;
 
-function requestDraw(kind) {
+function requestDraw(kind?: ViewKind) {
   if (kind) dirty.add(kind);
   else KINDS_2D.forEach((k) => dirty.add(k));
   if (!frame) frame = requestAnimationFrame(drawAll);
@@ -98,37 +196,49 @@ function drawAll() {
   dirty.clear();
 }
 
-const mm = (v) => v / S.vol.sx;
+// The open scan, for code that only runs while one is open.
+function volume(): ScanVolume {
+  if (!S.vol) throw new Error('No scan is open');
+  return S.vol;
+}
+
+const mm = (v: number) => v / volume().sx;
 const rounded = () => S.cursor.map((v) => Math.round(v));
 
-function planeFor(kind) {
-  const vol = S.vol;
+interface PlaneSource {
+  key: string; // what is shown
+  mkey: string; // which measurements belong to it
+  make: () => Plane | null;
+}
+
+function planeFor(kind: ViewKind): PlaneSource {
+  const vol = volume();
+  const arch = S.arch;
   const [ix, iy, iz] = rounded();
   switch (kind) {
     case 'axial': return { key: `a${iz}`, mkey: `a${iz}`, make: () => R.axial(vol, iz) };
     case 'coronal': return { key: `c${iy}`, mkey: `c${iy}`, make: () => R.coronal(vol, iy) };
     case 'sagittal': return { key: `s${ix}`, mkey: `s${ix}`, make: () => R.sagittal(vol, ix) };
     case 'pano': {
-      if (!S.arch) return { key: 'none', mkey: 'none', make: () => null };
+      if (!arch) return { key: 'none', mkey: 'none', make: () => null };
       const mkey = `p${S.archIdx}:${S.panoOffset}`;
       return {
         key: `${mkey}:${S.panoThick}:${S.panoMode}`, mkey,
-        make: () => R.panoramic(vol, S.arch, mm(S.panoOffset), mm(S.panoThick), S.panoMode),
+        make: () => R.panoramic(vol, arch, mm(S.panoOffset), mm(S.panoThick), S.panoMode),
       };
     }
     case 'cross': {
-      if (!S.arch) return { key: 'none', mkey: 'none', make: () => null };
+      if (!arch) return { key: 'none', mkey: 'none', make: () => null };
       const mkey = `x${S.archIdx}:${S.csIndex}:${S.panoOffset}`;
       return {
         key: `${mkey}:${S.csWidth}`, mkey,
-        make: () => R.crossSection(vol, S.arch, S.csIndex, mm(S.panoOffset), mm(S.csWidth), 1),
+        make: () => R.crossSection(vol, arch, S.csIndex, mm(S.panoOffset), mm(S.csWidth), 1),
       };
     }
   }
-  return null;
 }
 
-function reslice(kind) {
+function reslice(kind: ViewKind) {
   const vp = views[kind];
   const p = planeFor(kind);
   if (vp.sliceKey === p.key) return;
@@ -169,8 +279,8 @@ function renderStatusWl() {
 
 // ---------------------------------------------------------------- coordinates
 
-function imageToVoxel(kind, u, v, plane) {
-  const { nz } = S.vol;
+function imageToVoxel(kind: ViewKind, u: number, v: number, plane: Plane | null): number[] | null {
+  const { nz } = volume();
   const iu = u - 0.5, iv = v - 0.5;
   const z = nz - 1 - iv;
   switch (kind) {
@@ -185,71 +295,73 @@ function imageToVoxel(kind, u, v, plane) {
       return [a.x[i] + off * a.nx[i], a.y[i] + off * a.ny[i], z, i];
     }
     case 'cross': {
-      const p = plane;
+      const p = plane as CrossPlane | null;
       if (!p || !S.arch) return null;
       const d = p.half - iu;
       return [p.cx + d * S.arch.nx[p.index], p.cy + d * S.arch.ny[p.index], z];
     }
   }
-  return null;
 }
 
-function setCursor(p) {
-  const { nx, ny, nz } = S.vol;
+function setCursor(p: number[]) {
+  const { nx, ny, nz } = volume();
   S.cursor = [clamp(p[0], 0, nx - 1), clamp(p[1], 0, ny - 1), clamp(p[2], 0, nz - 1)];
 }
 
 // The cross-section position is kept in millimetres so stepping by 1 mm never drifts.
-function setCross(index) {
+function setCross(index: number) {
   if (!S.arch) return;
   S.csIndex = clamp(Math.round(index), 0, S.arch.M - 1);
-  S.csMm = S.csIndex * S.vol.sx;
+  S.csMm = S.csIndex * volume().sx;
 }
 
-function setCrossMm(value) {
+function setCrossMm(value: number) {
   if (!S.arch) return;
-  S.csMm = clamp(value, 0, (S.arch.M - 1) * S.vol.sx);
-  S.csIndex = Math.round(S.csMm / S.vol.sx);
+  const { sx } = volume();
+  S.csMm = clamp(value, 0, (S.arch.M - 1) * sx);
+  S.csIndex = Math.round(S.csMm / sx);
 }
 
-function navigate(vp, u, v) {
+function navigate(vp: Viewport, u: number, v: number) {
   const p = imageToVoxel(vp.kind, u, v, vp.plane);
   if (!p) return;
   setCursor(p);
   if (vp.kind === 'pano') setCross(p[3]);
   if (vp.kind === 'axial' && S.arch) {
     const near = R.nearestOnArch(S.arch, p[0], p[1]);
-    if (near.dist * S.vol.sx < 15) setCross(near.index);
+    if (near.dist * volume().sx < 15) setCross(near.index);
   }
   refresh();
 }
 
 // ---------------------------------------------------------------- interaction hooks
 
-const hooks = {
+const hooks: ViewHooks = {
   invalidate: (vp) => requestDraw(vp.kind),
   tool: () => S.tool,
   windowLevel(dx, dy) {
     const k = Math.max(1, S.wl.w / 300);
     S.wl.w = clamp(S.wl.w + dx * k, 20, 20000);
     S.wl.c += dy * k;
-    $('#preset').value = 'custom';
+    $<HTMLSelectElement>('#preset').value = 'custom';
     buildLut();
   },
   // Returns how to undo the action, for when a second finger turns the gesture into a pinch.
   dragStart(vp, mode, pos) {
+    const plane = vp.plane;
+    if (!plane) return null;
     const inside = vp.inside(pos.u, pos.v);
     if (mode === 'navigate') {
       const before = { cursor: S.cursor.slice(), csIndex: S.csIndex, csMm: S.csMm };
       navigate(vp, pos.u, pos.v);
       return () => { Object.assign(S, before); refresh(); };
     } else if (mode === 'measure' && inside) {
-      S.measuring = { type: 'distance', kind: vp.kind, key: vp.measureKey, a: [pos.u, pos.v], b: [pos.u, pos.v], sx: vp.plane.sx, sy: vp.plane.sy };
+      S.measuring = { type: 'distance', kind: vp.kind, key: vp.measureKey, a: [pos.u, pos.v], b: [pos.u, pos.v], sx: plane.sx, sy: plane.sy };
       return () => { S.measuring = null; requestDraw(vp.kind); };
     } else if (mode === 'angle' && inside) {
       const d = S.angleDraft;
       if (!d || d.kind !== vp.kind || d.key !== vp.measureKey) {
-        S.angleDraft = { type: 'angle', kind: vp.kind, key: vp.measureKey, pts: [[pos.u, pos.v]], sx: vp.plane.sx, sy: vp.plane.sy };
+        S.angleDraft = { type: 'angle', kind: vp.kind, key: vp.measureKey, pts: [[pos.u, pos.v]], sx: plane.sx, sy: plane.sy };
         requestDraw(vp.kind);
         return () => { S.angleDraft = d; requestDraw(); };
       }
@@ -308,11 +420,11 @@ const hooks = {
     }
     const el = $('#statusHover');
     if (!pos && lifted) return;
-    if (!pos || !S.vol || !vp.inside(pos.u, pos.v)) { el.textContent = ''; return; }
     const p = vp.plane;
+    if (!pos || !S.vol || !p || !vp.inside(pos.u, pos.v)) { el.textContent = ''; return; }
     const raw = p.data[Math.floor(pos.v) * p.w + Math.floor(pos.u)];
     const hu = Math.round(raw * S.vol.slope + S.vol.intercept);
-    const vox = imageToVoxel(vp.kind, pos.u, pos.v, vp.plane);
+    const vox = imageToVoxel(vp.kind, pos.u, pos.v, p);
     const { sx, sy, sz } = S.vol;
     const where = vox ? `  ·  x ${(vox[0] * sx).toFixed(1)}  y ${(vox[1] * sy).toFixed(1)}  z ${(vox[2] * sz).toFixed(1)} mm` : '';
     el.textContent = `${t(`view.${vp.kind}`)}  ·  ${hu} HU${where}`;
@@ -338,16 +450,16 @@ const hooks = {
   dblclick(vp) {
     if (S.tool === 'arch' && vp.kind === 'axial' && S.drawing) { finishArch(); return; }
     if (S.tool === 'angle') return;
-    toggleMax(vp.el);
+    if (vp.el) toggleMax(vp.el);
   },
   overlay: drawOverlay,
 };
 
-function distanceMm(m) {
+function distanceMm(m: Distance) {
   return Math.hypot((m.b[0] - m.a[0]) * m.sx, (m.b[1] - m.a[1]) * m.sy);
 }
 
-function angleDeg(pts, sx, sy) {
+function angleDeg(pts: number[][], sx: number, sy: number) {
   const [a, b, c] = pts;
   const ux = (a[0] - b[0]) * sx, uy = (a[1] - b[1]) * sy;
   const vx = (c[0] - b[0]) * sx, vy = (c[1] - b[1]) * sy;
@@ -355,13 +467,13 @@ function angleDeg(pts, sx, sy) {
   return (Math.acos(clamp(cos, -1, 1)) * 180) / Math.PI;
 }
 
-function measureValue(m) {
+function measureValue(m: Measure) {
   return m.type === 'angle' ? `${angleDeg(m.pts, m.sx, m.sy).toFixed(1)}°` : `${distanceMm(m).toFixed(2)} mm`;
 }
 
 // View controls that do not fit beside the title go to a second line rather than being cut off.
 function fitControls() {
-  for (const head of document.querySelectorAll('.vhead')) {
+  for (const head of document.querySelectorAll<HTMLElement>('.vhead')) {
     const ctl = head.querySelector('.vctl');
     if (!ctl || !head.offsetParent) continue;
     head.classList.remove('stacked');
@@ -370,45 +482,49 @@ function fitControls() {
 }
 
 // Maximise one view, or restore the grid when it is already maximised.
-function toggleMax(el) {
+function toggleMax(el: HTMLElement) {
   const grid = $('#grid');
   const on = !el.classList.contains('maximized');
   document.querySelectorAll('.view.maximized').forEach((v) => v.classList.remove('maximized'));
   grid.classList.toggle('max', on);
   document.body.classList.toggle('expanded', on); // phones also fold the toolbar away
   if (on) el.classList.add('maximized');
-  document.querySelectorAll('.view .expand').forEach((b) => {
-    b.title = t(b.closest('.view').classList.contains('maximized') ? 'collapse.title' : 'expand.title');
+  setExpandTitles();
+}
+
+function setExpandTitles() {
+  document.querySelectorAll<HTMLElement>('.view .expand').forEach((b) => {
+    b.title = t(b.closest('.view')?.classList.contains('maximized') ? 'collapse.title' : 'expand.title');
   });
 }
 
 // ---------------------------------------------------------------- arches & canals
 
-function selectArch(idx) {
+function selectArch(idx: number) {
   S.archIdx = idx;
   const entry = S.arches[idx];
-  S.arch = entry ? (entry.built ||= R.buildArch(entry.points)) : null;
+  const arch = S.arch = entry ? (entry.built ||= R.buildArch(entry.points)) : null;
   S.panoOffset = 0;
-  setCross(S.arch ? Math.floor(S.arch.M / 2) : 0);
+  setCross(arch ? Math.floor(arch.M / 2) : 0);
   for (const c of S.canals) {
-    if (!S.arch) { c.proj = null; continue; }
+    if (!arch) { c.proj = null; continue; }
     c.proj = c.dense.map((p) => {
-      const n = R.nearestOnArch(S.arch, p[0], p[1]);
-      return n.index === 0 || n.index === S.arch.M - 1 ? null : [n.index, p[2]];
+      const n = R.nearestOnArch(arch, p[0], p[1]);
+      return n.index === 0 || n.index === arch.M - 1 ? null : [n.index, p[2]];
     });
   }
   fillArchSelect();
   refresh();
 }
 
-function archName(a) {
+function archName(a: ArchEntry) {
   if (a.custom) return t('arch.custom', { n: a.custom });
   if (a.auto) return t('arch.auto');
-  return a.demo ? t('arch.demo') : a.name;
+  return a.demo ? t('arch.demo') : a.name ?? '';
 }
 
 function fillArchSelect() {
-  const sel = $('#arch');
+  const sel = $<HTMLSelectElement>('#arch');
   sel.innerHTML = '';
   if (!S.arches.length) {
     sel.append(new Option(t('arch.none'), '-1'));
@@ -422,7 +538,7 @@ function fillArchSelect() {
 }
 
 function finishArch() {
-  const pts = [];
+  const pts: Point[] = [];
   for (const p of S.drawing || []) {
     const last = pts[pts.length - 1];
     if (!last || Math.hypot(p[0] - last[0], p[1] - last[1]) > 3) pts.push(p);
@@ -441,13 +557,15 @@ function finishArch() {
   selectArch(S.arches.length - 1);
 }
 
-function cssColor(rgb, alpha = 1) {
+function cssColor(rgb: number[], alpha = 1) {
   return `rgba(${Math.round(rgb[0] * 255)}, ${Math.round(rgb[1] * 255)}, ${Math.round(rgb[2] * 255)}, ${alpha})`;
 }
 
 // ---------------------------------------------------------------- overlay drawing
 
-function path(ctx, pts, color, width, { dash = [], alpha = 1 } = {}) {
+type Ctx = CanvasRenderingContext2D;
+
+function path(ctx: Ctx, pts: number[][], color: string, width: number, { dash = [] as number[], alpha = 1 } = {}) {
   if (pts.length < 2) return;
   ctx.save();
   ctx.globalAlpha = alpha;
@@ -462,7 +580,7 @@ function path(ctx, pts, color, width, { dash = [], alpha = 1 } = {}) {
   ctx.restore();
 }
 
-function ring(ctx, [x, y], r, color) {
+function ring(ctx: Ctx, [x, y]: number[], r: number, color: string) {
   ctx.save();
   ctx.beginPath();
   ctx.arc(x, y, Math.max(2.5, r), 0, Math.PI * 2);
@@ -474,7 +592,7 @@ function ring(ctx, [x, y], r, color) {
   ctx.restore();
 }
 
-function dot(ctx, [x, y], color, r = 3) {
+function dot(ctx: Ctx, [x, y]: number[], color: string, r = 3) {
   ctx.save();
   ctx.fillStyle = color;
   ctx.beginPath();
@@ -483,7 +601,17 @@ function dot(ctx, [x, y], color, r = 3) {
   ctx.restore();
 }
 
-function label(ctx, str, x, y, { color = '#e8edf3', align = 'left', baseline = 'alphabetic', bg = null, size = 12, weight = 500 } = {}) {
+interface LabelStyle {
+  color?: string;
+  align?: CanvasTextAlign;
+  baseline?: CanvasTextBaseline;
+  bg?: string | null;
+  size?: number;
+  weight?: number;
+}
+
+function label(ctx: Ctx, str: string, x: number, y: number,
+  { color = '#e8edf3', align = 'left', baseline = 'alphabetic', bg = null, size = 12, weight = 500 }: LabelStyle = {}) {
   ctx.save();
   ctx.font = `${weight} ${size}px ui-sans-serif, system-ui, "Segoe UI", sans-serif`;
   ctx.textAlign = align;
@@ -504,7 +632,8 @@ function label(ctx, str, x, y, { color = '#e8edf3', align = 'left', baseline = '
   ctx.restore();
 }
 
-function crosshair(vp, ctx, X, Y, vColor, hColor) {
+function crosshair(vp: Viewport, ctx: Ctx, X: number, Y: number, vColor: string, hColor: string) {
+  if (!vp.plane) return;
   const [x0, y0] = vp.toScreen(0, 0);
   const [x1, y1] = vp.toScreen(vp.plane.w, vp.plane.h);
   const g = 12;
@@ -529,10 +658,10 @@ function crosshair(vp, ctx, X, Y, vColor, hColor) {
 }
 
 // vp.report (off-screen exports): no crosshair or arch guides; optional numbered ticks.
-function drawOverlay(vp, ctx) {
+function drawOverlay(vp: Viewport, ctx: Ctx) {
   const kind = vp.kind;
   const info = vp.el?.querySelector('.vinfo');
-  const setInfo = (s) => { if (info) info.textContent = s; };
+  const setInfo = (s: string) => { if (info) info.textContent = s; };
   if (!S.vol) { setInfo(''); return; }
   if (!vp.plane) {
     setInfo('');
@@ -544,15 +673,15 @@ function drawOverlay(vp, ctx) {
   const guides = S.showGuides && !vp.report;
   const nz = S.vol.nz;
   const [ix, iy, iz] = vp.slice ?? rounded();
-  const P = (x, y) => vp.toScreen(x + 0.5, y + 0.5);
-  const Z = (z) => nz - 1 - z;
+  const P = (x: number, y: number) => vp.toScreen(x + 0.5, y + 0.5);
+  const Z = (z: number) => nz - 1 - z;
   const a = S.arch;
 
   if (kind === 'axial') {
     if (guides && a) {
       const off = mm(S.panoOffset);
-      const curve = (d) => {
-        const pts = [];
+      const curve = (d: number) => {
+        const pts: number[][] = [];
         for (let i = 0; i < a.M; i += 2) pts.push(P(a.x[i] + d * a.nx[i], a.y[i] + d * a.ny[i]));
         return pts;
       };
@@ -562,7 +691,7 @@ function drawOverlay(vp, ctx) {
         path(ctx, curve(off - half), COLORS.pano, 1, { dash: [4, 4], alpha: 0.45 });
         path(ctx, curve(off + half), COLORS.pano, 1, { dash: [4, 4], alpha: 0.45 });
       }
-      const cp = views.cross.plane;
+      const cp = views.cross.plane as CrossPlane | null;
       if (cp) {
         const i = cp.index;
         const A = P(cp.cx + cp.half * a.nx[i], cp.cy + cp.half * a.ny[i]);
@@ -610,8 +739,8 @@ function drawOverlay(vp, ctx) {
     if (S.showCanals) {
       for (const c of S.canals) {
         if (!c.proj) continue;
-        const segs = [];
-        let cur = [];
+        const segs: number[][][] = [];
+        let cur: number[][] = [];
         for (const pr of c.proj) {
           if (!pr) { if (cur.length > 1) segs.push(cur); cur = []; continue; }
           cur.push(P(pr[0], Z(pr[1])));
@@ -653,11 +782,11 @@ function drawOverlay(vp, ctx) {
     setInfo(`${name}${off}`);
   }
 
-  if (kind === 'cross') {
-    const cp = vp.plane;
+  if (kind === 'cross' && a) {
+    const cp = vp.plane as CrossPlane;
     const i = cp.index;
     if (S.showCanals) {
-      const f = (p) => (p[0] - cp.cx) * a.tx[i] + (p[1] - cp.cy) * a.ty[i];
+      const f = (p: Point) => (p[0] - cp.cx) * a.tx[i] + (p[1] - cp.cy) * a.ty[i];
       for (const c of S.canals) {
         for (const q of R.crossings(c.dense, f)) {
           const d = (q[0] - cp.cx) * a.nx[i] + (q[1] - cp.cy) * a.ny[i];
@@ -678,8 +807,8 @@ function drawOverlay(vp, ctx) {
   drawScaleBar(vp, ctx);
 }
 
-function drawMeasures(vp, ctx) {
-  const list = S.measures.filter((m) => m.kind === vp.kind && m.key === vp.measureKey);
+function drawMeasures(vp: Viewport, ctx: Ctx) {
+  const list: Measure[] = S.measures.filter((m) => m.kind === vp.kind && m.key === vp.measureKey);
   if (!vp.report && S.measuring && S.measuring.kind === vp.kind) list.push(S.measuring);
   list.forEach((m) => {
     const n = S.measures.indexOf(m) + 1;
@@ -694,8 +823,8 @@ function drawMeasures(vp, ctx) {
   }
 }
 
-function drawDistance(vp, ctx, m, tag) {
-  const A = vp.toScreen(...m.a), B = vp.toScreen(...m.b);
+function drawDistance(vp: Viewport, ctx: Ctx, m: Distance, tag: string) {
+  const A = vp.toScreen(m.a[0], m.a[1]), B = vp.toScreen(m.b[0], m.b[1]);
   path(ctx, [A, B], COLORS.measure, 2);
   dot(ctx, A, COLORS.measure);
   dot(ctx, B, COLORS.measure);
@@ -703,7 +832,7 @@ function drawDistance(vp, ctx, m, tag) {
   label(ctx, `${tag}${distanceMm(m).toFixed(2)} mm`, mx + 8, my - 8, { color: '#0b1016', bg: COLORS.measure, size: 12, weight: 700 });
 }
 
-function drawAngle(vp, ctx, pts, m, tag) {
+function drawAngle(vp: Viewport, ctx: Ctx, pts: number[][], m: Angle, tag: string) {
   const P = pts.map((p) => vp.toScreen(p[0], p[1]));
   path(ctx, P, COLORS.measure, 2);
   P.forEach((p) => dot(ctx, p, COLORS.measure));
@@ -725,10 +854,10 @@ function drawAngle(vp, ctx, pts, m, tag) {
     { color: '#0b1016', bg: COLORS.measure, size: 12, weight: 700, align: 'center', baseline: 'middle' });
 }
 
-function drawEdgeLabels(vp, ctx) {
+function drawEdgeLabels(vp: Viewport, ctx: Ctx) {
   const compact = vp.report?.compact;
   const [l, r, top, b] = EDGE_LABELS[vp.kind].map((s) => (s.includes('.') ? t(compact ? `${s}.short` : s) : s));
-  const o = { color: 'rgba(232, 237, 243, 0.75)', size: compact ? 10 : 12, weight: 700 };
+  const o: LabelStyle = { color: 'rgba(232, 237, 243, 0.75)', size: compact ? 10 : 12, weight: 700 };
   label(ctx, l, 6, vp.cssH / 2, { ...o, baseline: 'middle' });
   label(ctx, r, vp.cssW - 6, vp.cssH / 2, { ...o, align: 'right', baseline: 'middle' });
   if (vp.report?.ticks) return;
@@ -736,7 +865,7 @@ function drawEdgeLabels(vp, ctx) {
   label(ctx, b, vp.cssW / 2, vp.cssH - 6, { ...o, align: 'center' });
 }
 
-function drawScaleBar(vp, ctx) {
+function drawScaleBar(vp: Viewport, ctx: Ctx) {
   const compact = vp.report?.compact;
   const target = (compact ? 24 : 90) / vp.cssPerMm;
   const len = [1, 2, 5, 10, 20, 50, 100].find((v) => v >= target * 0.6) ?? 100;
@@ -756,7 +885,7 @@ function drawScaleBar(vp, ctx) {
 
 function stamp() {
   const d = new Date();
-  const p = (n) => String(n).padStart(2, '0');
+  const p = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
 }
 
@@ -765,7 +894,7 @@ function fileStem() {
   return name.replace(/[^\p{L}\p{N}_-]+/gu, '-').replace(/^-+|-+$/g, '').toLowerCase() || 'scan';
 }
 
-function download(blob, name) {
+function download(blob: Blob, name: string) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -776,11 +905,11 @@ function download(blob, name) {
   setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
 
-const canvasBlob = (canvas) => new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+const canvasBlob = (canvas: HTMLCanvasElement) => new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'));
 
-async function saveView(kind) {
+async function saveView(kind: ViewKind | 'vr') {
   if (!S.vol) return;
-  let canvas;
+  let canvas: HTMLCanvasElement;
   if (kind === 'vr') {
     if (!vr || vr.failed) return;
     vr.draw(false);
@@ -804,24 +933,24 @@ async function saveLayout() {
   const canvas = document.createElement('canvas');
   canvas.width = Math.round(grid.width * dpr);
   canvas.height = Math.round((grid.height + strip) * dpr);
-  const ctx = canvas.getContext('2d');
+  const ctx = canvas.getContext('2d')!;
   ctx.scale(dpr, dpr);
   ctx.fillStyle = '#0a0d11';
   ctx.fillRect(0, 0, grid.width, grid.height + strip);
   drawLogo(ctx, 10, 8, 24);
   label(ctx, t('app.name'), 42, 25, { size: 15, weight: 700, color: '#e6edf3' });
   label(ctx, patientLine(), grid.width - 12, 25, { size: 13, align: 'right', color: '#aab6c3' });
-  for (const el of document.querySelectorAll('#grid > .view')) {
+  for (const el of document.querySelectorAll<HTMLElement>('#grid > .view')) {
     if (!el.offsetParent) continue;
-    const kind = el.dataset.view;
+    const kind = el.dataset.view as ViewKind | 'vr';
     const r = el.getBoundingClientRect();
     const x = r.left - grid.left, y = r.top - grid.top + strip;
-    const head = el.querySelector('.vhead').getBoundingClientRect();
-    const wrap = el.querySelector('.canvas-wrap').getBoundingClientRect();
+    const head = find(el, '.vhead').getBoundingClientRect();
+    const wrap = find(el, '.canvas-wrap').getBoundingClientRect();
     ctx.fillStyle = '#11161c';
     ctx.fillRect(x, y, r.width, head.height);
     dot(ctx, [x + 13, y + head.height / 2], COLORS[kind], 4.5);
-    const info = el.querySelector('.vinfo').textContent;
+    const info = find(el, '.vinfo').textContent;
     label(ctx, `${t(`view.${kind}`)}${info ? `   ${info}` : ''}`, x + 24, y + head.height / 2, { baseline: 'middle', size: 12, weight: 600 });
     const source = kind === 'vr' ? vr?.canvas : views[kind].canvas;
     if (source) ctx.drawImage(source, x + (wrap.left - r.left), y + (wrap.top - r.top), wrap.width, wrap.height);
@@ -831,8 +960,8 @@ async function saveLayout() {
 }
 
 // Off-screen render of a plane at a physical size for the report.
-function renderPlane(kind, plane, wMm, hMm, extra = {}) {
-  const vp = new Viewport(null, kind, { invalidate() {}, overlay: drawOverlay },
+function renderPlane(kind: ViewKind, plane: Plane, wMm: number, hMm: number, extra: RenderExtras = {}) {
+  const vp = new Viewport(null, kind, { ...hooks, invalidate() {} },
     { width: wMm * CSS_PER_MM, height: hMm * CSS_PER_MM, pixelRatio: PIXEL_RATIO });
   vp.setPlane(plane);
   vp.report = extra;
@@ -850,15 +979,15 @@ function patientLine() {
 }
 
 async function createPdfReport() {
-  if (!S.vol) return;
+  const vol = S.vol, m = S.meta;
+  if (!vol || !m) return;
   showLoading(t('report.creating'), 0.2);
   await new Promise((r) => setTimeout(r, 30));
   try {
-    const m = S.meta;
-    const { nx, ny, nz, sx, sy, sz } = S.vol;
+    const { nx, ny, nz, sx, sy, sz } = vol;
     const now = new Date();
-    const fmt = (v) => (Number.isInteger(v) ? String(v) : v.toFixed(3).replace(/0+$/, ''));
-    const info = [
+    const fmt = (v: number) => (Number.isInteger(v) ? String(v) : v.toFixed(3).replace(/0+$/, ''));
+    const info: [string, string][] = [
       [t('report.patient'), m.demo ? t('patient.demo') : m.patientName],
       [t('report.id'), m.patientId],
       [t('report.dob'), m.birthDate],
@@ -874,43 +1003,44 @@ async function createPdfReport() {
     ];
 
     const [ix, iy, iz] = rounded();
-    const axial = R.axial(S.vol, iz);
-    const physical = (p) => (p.w * p.sx) / (p.h * p.sy);
+    const axial = R.axial(vol, iz);
+    const physical = (p: Plane) => (p.w * p.sx) / (p.h * p.sy);
     const panoPlane = views.pano.plane;
-    const pano = panoPlane && {
+    const pano: ReportInput['pano'] = panoPlane && {
       title: t('view.pano'),
       subtitle: [S.arches[S.archIdx] && archName(S.arches[S.archIdx]), `${S.panoThick} mm`].filter(Boolean).join(' · '),
       aspect: physical(panoPlane),
       render: (w, h, extra = {}) => renderPlane('pano', panoPlane, w, h, { ...extra, measureKey: extra.ticks ? null : views.pano.measureKey }),
     };
 
-    const tiles = [];
+    const tiles: Tile[] = [];
     if (vr && !vr.failed && vr.ready) {
-      tiles.push({ title: t('view.vr'), subtitle: $('#vrPreset').selectedOptions[0].textContent,
-        render: (w, h) => vr.snapshot(w * CSS_PER_MM * PIXEL_RATIO, h * CSS_PER_MM * PIXEL_RATIO) });
+      const view = vr;
+      tiles.push({ title: t('view.vr'), subtitle: $<HTMLSelectElement>('#vrPreset').selectedOptions[0]?.textContent ?? '',
+        render: (w, h) => view.snapshot(w * CSS_PER_MM * PIXEL_RATIO, h * CSS_PER_MM * PIXEL_RATIO) });
     }
     tiles.push({ title: t('view.axial'), subtitle: t('info.slice', { n: iz + 1, total: nz }),
       render: (w, h) => renderPlane('axial', axial, w, h, { measureKey: `a${iz}`, slice: [ix, iy, iz] }) });
     if (!pano) {
-      tiles.push({ title: t('view.coronal'), render: (w, h) => renderPlane('coronal', R.coronal(S.vol, iy), w, h, { measureKey: `c${iy}`, slice: [ix, iy, iz] }) });
-      tiles.push({ title: t('view.sagittal'), render: (w, h) => renderPlane('sagittal', R.sagittal(S.vol, ix), w, h, { measureKey: `s${ix}`, slice: [ix, iy, iz] }) });
+      tiles.push({ title: t('view.coronal'), render: (w, h) => renderPlane('coronal', R.coronal(vol, iy), w, h, { measureKey: `c${iy}`, slice: [ix, iy, iz] }) });
+      tiles.push({ title: t('view.sagittal'), render: (w, h) => renderPlane('sagittal', R.sagittal(vol, ix), w, h, { measureKey: `s${ix}`, slice: [ix, iy, iz] }) });
     }
 
     // Serial cross-sections every S.csStep mm along the whole arch (1 mm by default).
-    let cross = null;
-    if (pano) {
+    let cross: ReportInput['cross'] = null;
+    if (pano && S.arch) {
       const a = S.arch;
       const step = S.csStep;
       const lengthMm = (a.M - 1) * sx;
       const first = Math.ceil(2 / step) * step;
-      const fmt = (v) => v.toFixed(step < 1 ? 1 : 0);
-      const items = [];
+      const fmt = (v: number) => v.toFixed(step < 1 ? 1 : 0);
+      const items: CrossItem[] = [];
       for (let k = 0; first + k * step <= lengthMm - 2 + 1e-6 && items.length < 400; k++) {
         const pos = first + k * step;
         items.push({ index: Math.round(pos / sx), label: k + 1, detail: `${fmt(pos)} mm` });
       }
       if (items.length) {
-        const plane = (it) => R.crossSection(S.vol, a, it.index, mm(S.panoOffset), mm(S.csWidth), 1);
+        const plane = (it: CrossItem) => R.crossSection(vol, a, it.index, mm(S.panoOffset), mm(S.csWidth), 1);
         cross = {
           title: t('report.cross.title'),
           subtitle: t('report.cross.caption', { step: String(step), width: S.csWidth }),
@@ -922,12 +1052,12 @@ async function createPdfReport() {
       }
     }
 
-    const viewTiles = ['axial', 'cross', 'coronal', 'sagittal']
+    const viewTiles = (['axial', 'cross', 'coronal', 'sagittal'] as ViewKind[])
       .filter((k) => views[k].plane)
-      .map((k) => ({
+      .map((k): Tile => ({
         title: t(`view.${k}`),
-        subtitle: views[k].el.querySelector('.vinfo').textContent,
-        render: (w, h) => renderPlane(k, views[k].plane, w, h, { measureKey: views[k].measureKey, slice: [ix, iy, iz] }),
+        subtitle: views[k].el?.querySelector('.vinfo')?.textContent ?? '',
+        render: (w, h) => renderPlane(k, views[k].plane!, w, h, { measureKey: views[k].measureKey, slice: [ix, iy, iz] }),
       }));
     const measurements = S.measures.map((ms, i) => [
       String(i + 1),
@@ -966,7 +1096,7 @@ async function createPdfReport() {
     download(blob, `${fileStem()}-report-${stamp()}.pdf`);
   } catch (err) {
     console.error(err);
-    setMessage('err.report', { msg: err.message });
+    setMessage('err.report', { msg: errorText(err) });
   } finally {
     hideLoading();
     refresh();
@@ -976,7 +1106,7 @@ async function createPdfReport() {
 
 // ---------------------------------------------------------------- UI wiring
 
-function setMessage(key, vars = {}) {
+function setMessage(key: string | null, vars: Vars | (() => Vars) = {}) {
   S.message = key ? { key, vars } : null;
   renderMessage();
 }
@@ -990,9 +1120,9 @@ function renderMessage() {
 const touchOnly = () => matchMedia('(hover: none) and (pointer: coarse)').matches;
 const TOOL_MESSAGES = ['msg.arch.draw', 'msg.arch.tap', 'msg.angle', 'msg.angle.tap', 'msg.arch.axial'];
 
-function setTool(tool) {
+function setTool(tool: string) {
   S.tool = tool;
-  document.querySelectorAll('button[data-tool]').forEach((b) => b.classList.toggle('active', b.dataset.tool === tool));
+  document.querySelectorAll<HTMLElement>('button[data-tool]').forEach((b) => b.classList.toggle('active', b.dataset.tool === tool));
   document.body.dataset.tool = tool;
   if (tool !== 'arch' && S.drawing) {
     S.drawing = null;
@@ -1013,30 +1143,30 @@ function setTool(tool) {
 }
 
 // Phones show the panoramic and one other view; this picks the other one.
-function showSecond(kind) {
+function showSecond(kind: string) {
   $('#grid').dataset.second = kind;
-  document.querySelectorAll('#viewtabs [data-show]').forEach((b) => {
+  document.querySelectorAll<HTMLElement>('#viewtabs [data-show]').forEach((b) => {
     const on = b.dataset.show === kind;
     b.classList.toggle('active', on);
     b.setAttribute('aria-selected', String(on));
   });
 }
 
-function setMenu(open) {
+function setMenu(open: boolean) {
   $('#topbar').classList.toggle('open', open);
   $('#moreBtn').setAttribute('aria-expanded', String(open));
 }
 
 // Make sure a view is on screen: leave another view's full-window mode, pick its phone tab.
-function revealView(kind) {
-  const el = document.querySelector(`.view[data-view="${kind}"]`);
-  const max = document.querySelector('.view.maximized');
+function revealView(kind: string) {
+  const el = $(`.view[data-view="${kind}"]`);
+  const max = document.querySelector<HTMLElement>('.view.maximized');
   if (max && max !== el) toggleMax(max);
   if (!el.offsetParent) showSecond(kind);
 }
 
 function fillPresetSelect() {
-  const preset = $('#preset');
+  const preset = $<HTMLSelectElement>('#preset');
   const value = preset.value;
   preset.innerHTML = '';
   for (const id of Object.keys(PRESETS)) preset.append(new Option(t(`preset.${id}`), id));
@@ -1044,11 +1174,12 @@ function fillPresetSelect() {
   preset.value = value || 'bone';
 }
 
-function applyPreset(id) {
+function applyPreset(id: string) {
   const p = PRESETS[id];
-  if (!p || !S.vol) return;
+  const vol = S.vol;
+  if (!p || !vol || !S.meta) return;
   if (id === 'auto') {
-    const [lo, hi] = S.meta.percentiles.map((v) => v * S.vol.slope + S.vol.intercept);
+    const [lo, hi] = S.meta.percentiles.map((v) => v * vol.slope + vol.intercept);
     S.wl = { c: (lo + hi) / 2, w: Math.max(50, hi - lo) };
   } else {
     S.wl = { c: p.c, w: p.w };
@@ -1056,27 +1187,29 @@ function applyPreset(id) {
   buildLut();
 }
 
-function vrHu(level) {
+function vrHu(level: number) {
   const [lo, hi] = S.vrRange;
-  return (lo + level * (hi - lo)) * S.vol.slope + S.vol.intercept;
+  const { slope, intercept } = volume();
+  return (lo + level * (hi - lo)) * slope + intercept;
 }
 
-function vrLevel(hu) {
+function vrLevel(hu: number) {
   const [lo, hi] = S.vrRange;
-  return clamp(((hu - S.vol.intercept) / S.vol.slope - lo) / (hi - lo), 0, 1);
+  const { slope, intercept } = volume();
+  return clamp(((hu - intercept) / slope - lo) / (hi - lo), 0, 1);
 }
 
-function applyVrPreset(id) {
+function applyVrPreset(id: string) {
   if (!vr || vr.failed || !S.vol) return;
   const p = VR_PRESETS[id];
   vr.mode = p.mode;
-  const level = p.level ?? vrLevel(p.hu);
-  $('#vrLevel').value = level;
+  const level = p.level ?? vrLevel(p.hu ?? 0);
+  $<HTMLInputElement>('#vrLevel').value = String(level);
   applyVrLevel(level);
   fitControls();
 }
 
-function applyVrLevel(level) {
+function applyVrLevel(level: number) {
   if (!vr || vr.failed || !S.vol) return;
   if (vr.mode === 2) {
     vr.gain = 1 + level * 20;
@@ -1089,16 +1222,16 @@ function applyVrLevel(level) {
 }
 
 function fillStepSelect() {
-  const sel = $('#csStep');
+  const sel = $<HTMLSelectElement>('#csStep');
   sel.innerHTML = '';
   for (const v of CROSS_STEPS) sel.append(new Option(t('cs.step', { v }), String(v)));
   sel.value = String(S.csStep);
 }
 
-function applyLanguage(lang, chosen = false) {
+function applyLanguage(lang: string, chosen = false) {
   setLanguage(lang);
   if (chosen) rememberLanguageInUrl();
-  $('#lang').value = getLanguage();
+  $<HTMLSelectElement>('#lang').value = getLanguage();
   fillPresetSelect();
   fillStepSelect();
   if (S.vol) fillArchSelect();
@@ -1107,27 +1240,29 @@ function applyLanguage(lang, chosen = false) {
   renderMessage();
   renderAbout();
   renderPrivacy();
-  if (vr && !vr.failed && S.vol) applyVrLevel(Number($('#vrLevel').value));
-  if (vr?.failed) vr.el.querySelector('.empty').textContent = t('err.3d', { msg: t(`err.${vr.failed}`) });
-  document.querySelectorAll('.view .expand').forEach((b) => {
-    b.title = t(b.closest('.view').classList.contains('maximized') ? 'collapse.title' : 'expand.title');
-  });
+  if (vr && !vr.failed && S.vol) applyVrLevel(Number($<HTMLInputElement>('#vrLevel').value));
+  if (vr?.failed) find(vr.el, '.empty').textContent = t('err.3d', { msg: t(`err.${vr.failed}`) });
+  setExpandTitles();
   fitControls();
   requestDraw();
 }
 
 function bindUi() {
-  document.querySelectorAll('button[data-tool]').forEach((b) => b.addEventListener('click', () => setTool(b.dataset.tool)));
-  $('#preset').addEventListener('change', (e) => applyPreset(e.target.value));
-  $('#lang').addEventListener('change', (e) => applyLanguage(e.target.value, true));
+  document.querySelectorAll<HTMLElement>('button[data-tool]').forEach((b) => b.addEventListener('click', () => setTool(b.dataset.tool ?? 'navigate')));
+  const preset = $<HTMLSelectElement>('#preset');
+  preset.addEventListener('change', () => applyPreset(preset.value));
+  const lang = $<HTMLSelectElement>('#lang');
+  lang.addEventListener('change', () => applyLanguage(lang.value, true));
 
   $('#invert').addEventListener('click', () => {
     S.invert = !S.invert;
     $('#invert').classList.toggle('active', S.invert);
     buildLut();
   });
-  $('#showCanals').addEventListener('change', (e) => { S.showCanals = e.target.checked; requestDraw(); });
-  $('#showGuides').addEventListener('change', (e) => { S.showGuides = e.target.checked; requestDraw(); });
+  const canals = $<HTMLInputElement>('#showCanals');
+  canals.addEventListener('change', () => { S.showCanals = canals.checked; requestDraw(); });
+  const guides = $<HTMLInputElement>('#showGuides');
+  guides.addEventListener('change', () => { S.showGuides = guides.checked; requestDraw(); });
   $('#clearMeasures').addEventListener('click', () => { S.measures = []; S.angleDraft = null; requestDraw(); });
   $('#resetViews').addEventListener('click', () => {
     KINDS_2D.forEach((k) => views[k].resetView());
@@ -1137,24 +1272,25 @@ function bindUi() {
   $('#snapshotBtn').addEventListener('click', saveLayout);
   $('#reportBtn').addEventListener('click', createPdfReport);
 
-  document.querySelectorAll('.view').forEach((el) => {
-    el.querySelector('.expand').addEventListener('click', () => toggleMax(el));
-    el.querySelector('.save').addEventListener('click', () => saveView(el.dataset.view));
+  document.querySelectorAll<HTMLElement>('.view').forEach((el) => {
+    find(el, '.expand').addEventListener('click', () => toggleMax(el));
+    find(el, '.save').addEventListener('click', () => saveView(el.dataset.view as ViewKind | 'vr'));
   });
-  document.querySelectorAll('#viewtabs [data-show]').forEach((b) => b.addEventListener('click', () => {
-    const max = document.querySelector('.view.maximized');
+  document.querySelectorAll<HTMLElement>('#viewtabs [data-show]').forEach((b) => b.addEventListener('click', () => {
+    const max = document.querySelector<HTMLElement>('.view.maximized');
     if (max) toggleMax(max);
-    showSecond(b.dataset.show);
+    showSecond(b.dataset.show ?? 'cross');
   }));
 
   // The ⋯ menu on narrow screens closes after an action, or a tap anywhere else.
   const topbar = $('#topbar');
   const more = $('#more');
-  more.addEventListener('click', (e) => { if (e.target.closest('button')) setMenu(false); });
-  more.addEventListener('change', (e) => { if (e.target.matches('select')) setMenu(false); });
+  const target = (e: Event) => (e.target instanceof Element ? e.target : null);
+  more.addEventListener('click', (e) => { if (target(e)?.closest('button')) setMenu(false); });
+  more.addEventListener('change', (e) => { if (target(e)?.matches('select')) setMenu(false); });
   $('#moreBtn').addEventListener('click', () => setMenu(!topbar.classList.contains('open')));
   document.addEventListener('pointerdown', (e) => {
-    if (topbar.classList.contains('open') && !e.target.closest('#more, #moreBtn')) setMenu(false);
+    if (topbar.classList.contains('open') && !target(e)?.closest('#more, #moreBtn')) setMenu(false);
   });
 
   $('#helpBtn').addEventListener('click', () => openCenter('guide'));
@@ -1162,50 +1298,57 @@ function bindUi() {
   $('#privacyBadge').addEventListener('click', () => openCenter('privacy'));
   $('#welcomePrivacy').addEventListener('click', () => openCenter('privacy'));
   const center = $('#center');
-  center.addEventListener('click', (e) => { if (e.target === center || e.target.closest('.center-close')) closeCenter(); });
-  center.querySelectorAll('[data-tab]').forEach((b) => b.addEventListener('click', () => openCenter(b.dataset.tab)));
+  center.addEventListener('click', (e) => { if (e.target === center || target(e)?.closest('.center-close')) closeCenter(); });
+  center.querySelectorAll<HTMLElement>('[data-tab]').forEach((b) => b.addEventListener('click', () => openCenter(b.dataset.tab)));
   $('#closeScanBtn').addEventListener('click', closeScan);
   window.addEventListener('hashchange', routeHash);
-  $('#aboutSource').href = REPO_URL;
-  $('#aboutIssues').href = `${REPO_URL}/issues`;
-  $('#aboutLicense').href = `${REPO_URL}/blob/main/LICENSE`;
-  const offline = $('#offlineLink');
+  $<HTMLAnchorElement>('#aboutSource').href = REPO_URL;
+  $<HTMLAnchorElement>('#aboutIssues').href = `${REPO_URL}/issues`;
+  $<HTMLAnchorElement>('#aboutLicense').href = `${REPO_URL}/blob/main/LICENSE`;
+  const offline = $<HTMLAnchorElement>('#offlineLink');
   if (document.documentElement.dataset.build === 'bundle' && location.protocol.startsWith('http')) {
     offline.href = location.pathname;
     offline.hidden = false;
   }
 
-  $('#arch').addEventListener('change', (e) => selectArch(Number(e.target.value)));
-  const thick = $('#panoThick');
+  const arch = $<HTMLSelectElement>('#arch');
+  arch.addEventListener('change', () => selectArch(Number(arch.value)));
+  const thick = $<HTMLInputElement>('#panoThick');
   thick.addEventListener('input', () => {
     S.panoThick = Number(thick.value);
     $('#panoThickOut').textContent = `${S.panoThick} mm`;
     refresh();
   });
-  $('#panoMode').addEventListener('change', (e) => { S.panoMode = e.target.value; refresh(); });
-  $('#csWidth').addEventListener('change', (e) => { S.csWidth = Number(e.target.value); refresh(); });
-  $('#csStep').addEventListener('change', (e) => { S.csStep = Number(e.target.value); });
-  $('#vrPreset').addEventListener('change', (e) => applyVrPreset(e.target.value));
-  $('#vrLevel').addEventListener('input', (e) => applyVrLevel(Number(e.target.value)));
-  $('#series').addEventListener('change', (e) => load(e.target.value));
+  const panoMode = $<HTMLSelectElement>('#panoMode');
+  panoMode.addEventListener('change', () => { S.panoMode = panoMode.value as PanoMode; refresh(); });
+  const csWidth = $<HTMLSelectElement>('#csWidth');
+  csWidth.addEventListener('change', () => { S.csWidth = Number(csWidth.value); refresh(); });
+  const csStep = $<HTMLSelectElement>('#csStep');
+  csStep.addEventListener('change', () => { S.csStep = Number(csStep.value); });
+  const vrPreset = $<HTMLSelectElement>('#vrPreset');
+  vrPreset.addEventListener('change', () => applyVrPreset(vrPreset.value));
+  const vrLevelInput = $<HTMLInputElement>('#vrLevel');
+  vrLevelInput.addEventListener('input', () => applyVrLevel(Number(vrLevelInput.value)));
+  const series = $<HTMLSelectElement>('#series');
+  series.addEventListener('change', () => load(series.value));
 
   // A folder on computers; on phones the scan usually arrives as a ZIP, and older ones cannot pick folders.
-  const folder = $('#folderInput');
-  const files = $('#fileInput');
+  const folder = $<HTMLInputElement>('#folderInput');
+  const files = $<HTMLInputElement>('#fileInput');
   $('#openBtn').addEventListener('click', () => (touchOnly() ? files : folder).click());
   $('#welcomeOpen').addEventListener('click', () => folder.click());
   $('#welcomeFiles').addEventListener('click', () => files.click());
   $('#welcomeDemo').addEventListener('click', openDemo);
-  $('#welcomeReal').href = DEMO_SCAN.url;
+  $<HTMLAnchorElement>('#welcomeReal').href = DEMO_SCAN.url;
   for (const input of [folder, files]) {
     input.addEventListener('change', () => {
-      const entries = entriesFromInput(input.files);
+      const entries = input.files ? entriesFromInput(input.files) : [];
       input.value = '';
       openEntries(entries);
     });
   }
 
-  const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
+  const hasFiles = (e: DragEvent) => [...(e.dataTransfer?.types || [])].includes('Files');
   let depth = 0;
   window.addEventListener('dragenter', (e) => {
     if (!hasFiles(e)) return;
@@ -1222,11 +1365,11 @@ function bindUi() {
     e.preventDefault();
     depth = 0;
     document.body.classList.remove('dragging');
-    entriesFromDrop(e.dataTransfer).then(openEntries).catch(fail);
+    if (e.dataTransfer) entriesFromDrop(e.dataTransfer).then(openEntries).catch(fail);
   });
 
   window.addEventListener('keydown', (e) => {
-    if (e.target.matches('input, select, textarea') || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (target(e)?.matches('input, select, textarea') || e.ctrlKey || e.metaKey || e.altKey) return;
     const k = e.key;
     const hovered = S.hoverKind && views[S.hoverKind];
     if (k === 'Escape' && !$('#center').hidden) {
@@ -1237,7 +1380,7 @@ function bindUi() {
       S.drawing = null;
       S.measuring = null;
       S.angleDraft = null;
-      const max = document.querySelector('.view.maximized');
+      const max = document.querySelector<HTMLElement>('.view.maximized');
       if (max) toggleMax(max);
       requestDraw();
     } else if (k === 'Enter' && S.drawing) {
@@ -1249,7 +1392,7 @@ function bindUi() {
     } else if (k === 'Delete' || k === 'Backspace') {
       S.measures.pop();
       requestDraw();
-    } else if (k === 'f' && hovered) {
+    } else if (k === 'f' && hovered && hovered.el) {
       toggleMax(hovered.el);
     } else if (k === 's' && hovered) {
       saveView(hovered.kind);
@@ -1262,7 +1405,7 @@ function bindUi() {
     } else if (k === '?') {
       openCenter('guide');
     } else {
-      const tool = { n: 'navigate', k: 'scroll', w: 'wl', p: 'pan', z: 'zoom', m: 'measure', l: 'angle', a: 'arch' }[k];
+      const tool = TOOL_KEYS[k];
       if (tool) setTool(tool);
     }
   });
@@ -1271,9 +1414,9 @@ function bindUi() {
 // ---------------------------------------------------------------- help centre: guide, privacy, about, terms
 
 const TABS = ['guide', 'privacy', 'about', 'terms'];
-const privacy = { blocked: 0, timer: 0 };
+const privacy: { blocked: number; timer?: ReturnType<typeof setInterval> } = { blocked: 0 };
 
-function setHash(tab) {
+function setHash(tab: string) {
   try {
     const url = new URL(location.href);
     url.hash = tab ? `#${tab}` : '';
@@ -1287,13 +1430,13 @@ function openCenter(tab = 'guide') {
   if (!TABS.includes(tab)) tab = 'guide';
   const center = $('#center');
   center.hidden = false;
-  center.querySelectorAll('[data-tab]').forEach((b) => {
+  center.querySelectorAll<HTMLElement>('[data-tab]').forEach((b) => {
     const on = b.dataset.tab === tab;
     b.classList.toggle('active', on);
     b.setAttribute('aria-selected', String(on));
   });
-  center.querySelectorAll('[data-panel]').forEach((panel) => { panel.hidden = panel.dataset.panel !== tab; });
-  center.querySelector('.center-body').scrollTop = 0;
+  center.querySelectorAll<HTMLElement>('[data-panel]').forEach((panel) => { panel.hidden = panel.dataset.panel !== tab; });
+  find(center, '.center-body').scrollTop = 0;
   setHash(tab);
   clearInterval(privacy.timer);
   if (tab === 'privacy') {
@@ -1323,9 +1466,9 @@ function renderAbout() {
 // Some antivirus products intercept HTTPS and add their own hosts to the policy so they can
 // inject a script; the check reads the effective policy and names any such hosts.
 function cspStatus() {
-  const policy = document.querySelector('meta[http-equiv="Content-Security-Policy"]')?.content || '';
+  const policy = document.querySelector<HTMLMetaElement>('meta[http-equiv="Content-Security-Policy"]')?.content || '';
   if (!policy) return { on: false, hosts: [] };
-  const directives = {};
+  const directives: Record<string, string[]> = {};
   for (const part of policy.split(';')) {
     const [name, ...sources] = part.trim().split(/\s+/);
     if (name) directives[name.toLowerCase()] = sources;
@@ -1339,7 +1482,7 @@ function cspStatus() {
 }
 
 function requestsAfterLoad() {
-  const nav = performance.getEntriesByType('navigation')[0];
+  const nav = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming | undefined;
   const loaded = nav ? nav.loadEventEnd || nav.domContentLoadedEventEnd : 0;
   const late = performance.getEntriesByType('resource').filter((e) => /^https?:/.test(e.name) && e.startTime > loaded);
   return { count: late.length, hosts: [...new Set(late.map((e) => new URL(e.name).host))] };
@@ -1350,16 +1493,16 @@ async function storedItems() {
   try { n += localStorage.length; } catch { /* blocked */ }
   try { n += sessionStorage.length; } catch { /* blocked */ }
   try { if (document.cookie) n += document.cookie.split(';').filter((c) => c.trim()).length; } catch { /* blocked */ }
-  try { if (globalThis.indexedDB?.databases) n += (await indexedDB.databases()).length; } catch { /* blocked */ }
+  try { if (typeof globalThis.indexedDB?.databases === 'function') n += (await indexedDB.databases()).length; } catch { /* blocked */ }
   try { if (globalThis.caches) n += (await caches.keys()).length; } catch { /* blocked */ }
   return n;
 }
 
-function setCheck(sel, ok, text) {
+function setCheck(sel: string, ok: boolean, text: string) {
   const row = $(sel);
   row.classList.toggle('ok', ok);
   row.classList.toggle('warn', !ok);
-  row.querySelector('.v').textContent = text;
+  find(row, '.v').textContent = text;
 }
 
 async function renderPrivacy() {
@@ -1378,7 +1521,7 @@ async function renderPrivacy() {
   const mb = S.vol ? Math.round(S.vol.data.byteLength / 1048576) : 0;
   const name = S.meta?.demo ? t('patient.demo') : S.meta?.patientName || '—';
   setCheck('#chkMemory', true, S.vol ? t('privacy.check.memory.some', { name, mb }) : t('privacy.check.memory.none'));
-  $('#closeScanBtn').disabled = !S.vol;
+  $<HTMLButtonElement>('#closeScanBtn').disabled = !S.vol;
 }
 
 // Drop every reference to the scan so the browser can free it, and clear rendered pixels.
@@ -1411,7 +1554,7 @@ function closeScan() {
 
 // ---------------------------------------------------------------- loading
 
-function showLoading(text, frac) {
+function showLoading(text: string, frac?: number) {
   $('#loading').hidden = false;
   $('#loadingLabel').textContent = text;
   $('#loadingBar').style.width = `${Math.round((frac ?? 0) * 100)}%`;
@@ -1421,12 +1564,12 @@ function hideLoading() {
   $('#loading').hidden = true;
 }
 
-function errorText(err) {
-  if (err?.code) return t(`err.${err.code}`, { detail: err.detail });
-  return err?.message || String(err);
+function errorText(err: unknown) {
+  if (err instanceof DicomError) return t(`err.${err.code}`, { detail: err.detail });
+  return (err instanceof Error && err.message) || String(err);
 }
 
-function fail(err) {
+function fail(err: unknown) {
   console.error(err);
   hideLoading();
   const text = errorText(err);
@@ -1441,16 +1584,16 @@ function fail(err) {
 }
 
 function fillSeries() {
-  const sel = $('#series');
+  const sel = $<HTMLSelectElement>('#series');
   sel.innerHTML = '';
   for (const s of S.series) sel.append(new Option(s.label, s.id));
   sel.hidden = S.series.length < 2;
 }
 
-async function load(id) {
+async function load(id: string) {
   const entry = S.series.find((s) => s.id === id);
   if (!entry) return;
-  $('#series').value = id;
+  $<HTMLSelectElement>('#series').value = id;
   window.__viewerReady = false;
   try {
     showLoading(t('loading.read'), 0);
@@ -1462,7 +1605,7 @@ async function load(id) {
 }
 
 // Files picked or dropped by the user, or the files inside a picked ZIP; nothing leaves the browser.
-async function openEntries(entries) {
+async function openEntries(entries: Entry[]) {
   if (!entries.length) return;
   try {
     showLoading(t('loading.scan'), 0);
@@ -1488,11 +1631,11 @@ async function openDemo() {
   setVolume(meta, data);
 }
 
-function setVolume(meta, data) {
+function setVolume(meta: ScanMeta, data: Uint16Array) {
   const [nx, ny, nz] = meta.dims;
   const [sx, sy, sz] = meta.spacing;
   S.meta = meta;
-  S.vol = { data, nx, ny, nz, sx, sy, sz, slope: meta.slope, intercept: meta.intercept, max: Math.max(meta.max, 1) };
+  const vol = S.vol = { data, nx, ny, nz, sx, sy, sz, slope: meta.slope, intercept: meta.intercept, max: Math.max(meta.max, 1) };
   const an = meta.analysis;
 
   setCursor(an?.ortho ? an.ortho.slice() : [nx / 2, ny / 2, nz / 2]);
@@ -1511,9 +1654,9 @@ function setVolume(meta, data) {
 
   S.arches = (an?.arches ?? []).map((a) => ({ name: a.name, type: a.type, points: a.points, demo: !!meta.demo }));
   // No arch in the scan's own analysis: find one from the teeth so the panoramic works.
-  let auto = null;
+  let auto: ReturnType<typeof detectArch> = null;
   if (!S.arches.length) {
-    auto = detectArch(S.vol);
+    auto = detectArch(vol);
     if (auto) S.arches.push({ auto: true, type: 'Auto', points: auto.points });
   }
   let idx = S.arches.findIndex((a) => a.type === 'MandibularArch');
@@ -1524,13 +1667,13 @@ function setVolume(meta, data) {
 
   KINDS_2D.forEach((k) => { views[k].sliceKey = null; views[k].resetView(); });
   selectArch(idx);
-  if (auto && !an?.ortho) {
+  if (auto && !an?.ortho && S.arch) {
     // Start on the front teeth rather than the middle of the volume.
     const m = S.arch.M >> 1;
     setCursor([S.arch.x[m], S.arch.y[m], (auto.slab[0] + auto.slab[1]) / 2]);
     refresh();
   }
-  $('#preset').value = 'bone';
+  $<HTMLSelectElement>('#preset').value = 'bone';
   applyPreset('bone');
 
   renderPatient();
@@ -1581,36 +1724,31 @@ function renderPatient() {
 }
 
 function prepare3d() {
-  if (!vr || vr.failed) { window.__viewerReady = true; return; }
-  const lo = (-200 - S.vol.intercept) / S.vol.slope;
-  const hi = S.meta.percentiles[1] * 1.05;
+  const view = vr, vol = S.vol, meta = S.meta;
+  if (!view || view.failed || !vol || !meta) { window.__viewerReady = true; return; }
+  const lo = (-200 - vol.intercept) / vol.slope;
+  const hi = meta.percentiles[1] * 1.05;
   S.vrRange = [Math.max(0, lo), Math.max(lo + 1, hi)];
   setTimeout(() => {
-    vr.setVolume(S.vol, S.vrRange[0], S.vrRange[1]);
-    applyVrPreset($('#vrPreset').value);
+    view.setVolume(vol, S.vrRange[0], S.vrRange[1]);
+    applyVrPreset($<HTMLSelectElement>('#vrPreset').value);
     window.__viewerReady = true;
   }, 30);
 }
 
 function start() {
   for (const kind of KINDS_2D) {
-    const el = document.querySelector(`.view[data-view="${kind}"]`);
+    const el = $(`.view[data-view="${kind}"]`);
     el.style.setProperty('--accent', COLORS[kind]);
     views[kind] = new Viewport(el, kind, hooks);
   }
-  const vrEl = document.querySelector('.view[data-view="vr"]');
+  const vrEl = $('.view[data-view="vr"]');
   vrEl.style.setProperty('--accent', COLORS.vr);
-  try {
-    vr = new VolumeView(vrEl, { dblclick: (v) => toggleMax(v.el) });
-  } catch (err) {
-    console.error(err);
-    vr = { failed: 'webgl', el: vrEl };
-  }
-  if (vr.failed) {
-    vr.el = vrEl;
-    vrEl.querySelector('.canvas-wrap').insertAdjacentHTML('beforeend', '<div class="empty"></div>');
-  }
-  document.querySelectorAll('#viewtabs [data-show]').forEach((b) => b.style.setProperty('--accent', COLORS[b.dataset.show]));
+  vr = new VolumeView(vrEl, { dblclick: (v) => toggleMax(v.el) });
+  if (vr.failed) find(vrEl, '.canvas-wrap').insertAdjacentHTML('beforeend', '<div class="empty"></div>');
+  document.querySelectorAll<HTMLElement>('#viewtabs [data-show]').forEach((b) => {
+    b.style.setProperty('--accent', COLORS[b.dataset.show as ViewKind | 'vr']);
+  });
   showSecond('cross');
   // A view's size is set by the layout, never by its header, so this cannot feed back on itself.
   const viewSizes = new ResizeObserver(fitControls);
@@ -1627,7 +1765,7 @@ function start() {
     try { localStorage.removeItem(key); } catch { /* storage unavailable */ }
   }
   document.addEventListener('securitypolicyviolation', () => { privacy.blocked++; renderPrivacy(); });
-  const langSelect = $('#lang');
+  const langSelect = $<HTMLSelectElement>('#lang');
   for (const l of LANGUAGES) langSelect.append(new Option(l.name, l.id));
 
   bindUi();

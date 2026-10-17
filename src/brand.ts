@@ -3,7 +3,7 @@
 export const ACCENT = '#2ec4b6';
 export const TOOTH_PATH = 'M7.2 3.2c-2.4 0-4.2 1.9-4.2 4.4 0 2.4.9 4.2 1.8 6.2.8 1.8 1.1 3.8 1.5 5.8.3 1.5 1 2.4 2 2.4 1.2 0 1.7-1.1 2-2.6l.5-2.6c.2-1 .7-1.5 1.2-1.5s1 .5 1.2 1.5l.5 2.6c.3 1.5.8 2.6 2 2.6 1 0 1.7-.9 2-2.4.4-2 .7-4 1.5-5.8.9-2 1.8-3.8 1.8-6.2 0-2.5-1.8-4.4-4.2-4.4-1.7 0-2.6.9-4.8.9s-3.1-.9-4.8-.9z';
 
-export function drawLogo(ctx, x, y, size, color = ACCENT) {
+export function drawLogo(ctx: CanvasRenderingContext2D, x: number, y: number, size: number, color = ACCENT) {
   const s = size / 24;
   ctx.save();
   ctx.translate(x, y);

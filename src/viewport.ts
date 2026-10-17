@@ -3,41 +3,114 @@
 // With el = null it renders off-screen at a fixed size (used for reports and exports).
 // Touch: one finger runs the tool, two fingers pinch to zoom and drag to pan.
 
-import { Touches } from './touch.js';
+import { Touches } from './touch.ts';
+import type { Plane } from './reslice.ts';
+import type { CrossItem } from './report.ts';
 
 const MIN_ZOOM = 0.25, MAX_ZOOM = 40;
 const SCROLL_PX = 10; // drag distance per slice with the scroll tool
 // Modes the view handles itself; every other mode is a tool handled by the hooks.
 const VIEW_MODES = new Set(['pan', 'zoom', 'wl', 'scroll']);
 
+export type ViewKind = 'pano' | 'axial' | 'cross' | 'coronal' | 'sagittal';
+
+// A pointer position on screen (X, Y in CSS pixels) and in the image (u, v).
+export interface Pos {
+  X: number;
+  Y: number;
+  u: number;
+  v: number;
+}
+
+// Options for off-screen renders: numbered ticks on the panoramic, smaller labels.
+export interface RenderExtras {
+  ticks?: CrossItem[];
+  compact?: boolean;
+  measureKey?: string | null;
+  slice?: number[];
+}
+
+export interface ViewHooks {
+  invalidate(vp: Viewport): void;
+  overlay(vp: Viewport, ctx: CanvasRenderingContext2D): void;
+  tool(vp: Viewport): string;
+  windowLevel(dx: number, dy: number): void;
+  // Returns how to undo the action, for when a second finger turns the gesture into a pinch.
+  dragStart(vp: Viewport, mode: string, pos: Pos, e: PointerEvent): (() => void) | null;
+  dragMove(vp: Viewport, mode: string, pos: Pos, e: PointerEvent): void;
+  dragEnd(vp: Viewport, mode: string, pos: Pos, e: PointerEvent): void;
+  hover(vp: Viewport, pos: Pos | null, lifted?: boolean): void;
+  scroll(vp: Viewport, dir: number, e?: { shiftKey: boolean }): void;
+  dblclick(vp: Viewport, e: Event): void;
+}
+
+interface Drag {
+  mode: string;
+  lastX: number;
+  lastY: number;
+  scrolled: number;
+  cancel?: (() => void) | null;
+}
+
 export class Viewport {
-  constructor(el, kind, hooks, offscreen = null) {
+  el: HTMLElement | null;
+  kind: ViewKind;
+  hooks: ViewHooks;
+  ratio: number | null;
+  wrap: HTMLElement | null;
+  canvas: HTMLCanvasElement;
+  ctx: CanvasRenderingContext2D;
+  off = document.createElement('canvas');
+  offCtx = this.off.getContext('2d')!;
+  img: ImageData | null = null;
+  img32: Uint32Array | null = null;
+  plane: Plane | null = null;
+  pixelsDirty = true;
+  zoom = 1;
+  panX = 0;
+  panY = 0;
+  cssW = 1;
+  cssH = 1;
+  // Set by layout() before anything is drawn or hit-tested.
+  cssPerMm!: number;
+  kx!: number;
+  ky!: number;
+  ox!: number;
+  oy!: number;
+  drag: Drag | null = null;
+  pinch: { dist: number; zoom: number; anchor: [number, number] } | null = null;
+  hover: Pos | null = null;
+  // Kept by the app: the slice shown, the measurements that belong to it, render options.
+  sliceKey: string | null = null;
+  measureKey: string | null = null;
+  report: RenderExtras | null = null;
+  slice?: number[];
+
+  constructor(el: HTMLElement | null, kind: ViewKind, hooks: ViewHooks,
+    offscreen: { width: number; height: number; pixelRatio: number } | null = null) {
     this.el = el;
     this.kind = kind;
     this.hooks = hooks;
     this.ratio = offscreen?.pixelRatio ?? null;
-    this.wrap = el ? el.querySelector('.canvas-wrap') : null;
-    this.canvas = el ? this.wrap.querySelector('canvas') : document.createElement('canvas');
-    this.ctx = this.canvas.getContext('2d');
-    this.off = document.createElement('canvas');
-    this.offCtx = this.off.getContext('2d');
-    this.plane = null;
-    this.pixelsDirty = true;
-    this.zoom = 1;
-    this.panX = 0;
-    this.panY = 0;
-    this.cssW = 1;
-    this.cssH = 1;
-    this.drag = null;
-    this.hover = null;
+    if (!el) {
+      this.wrap = null;
+      this.canvas = document.createElement('canvas');
+    } else {
+      const wrap = el.querySelector<HTMLElement>('.canvas-wrap');
+      const canvas = wrap?.querySelector('canvas');
+      if (!wrap || !canvas) throw new Error(`The ${kind} view has no canvas`);
+      this.wrap = wrap;
+      this.canvas = canvas;
+    }
+    this.ctx = this.canvas.getContext('2d')!;
     if (offscreen) {
       this.cssW = offscreen.width;
       this.cssH = offscreen.height;
-      this.canvas.width = Math.round(this.cssW * this.ratio);
-      this.canvas.height = Math.round(this.cssH * this.ratio);
+      this.canvas.width = Math.round(this.cssW * offscreen.pixelRatio);
+      this.canvas.height = Math.round(this.cssH * offscreen.pixelRatio);
       return;
     }
-    new ResizeObserver(() => this.resize()).observe(this.wrap);
+    if (this.wrap) new ResizeObserver(() => this.resize()).observe(this.wrap);
     this.bind();
   }
 
@@ -46,6 +119,7 @@ export class Viewport {
   }
 
   resize() {
+    if (!this.wrap) return;
     const r = this.wrap.getBoundingClientRect();
     const dpr = this.pixelRatio();
     this.cssW = Math.max(1, r.width);
@@ -55,7 +129,7 @@ export class Viewport {
     this.hooks.invalidate(this);
   }
 
-  setPlane(plane) {
+  setPlane(plane: Plane | null) {
     this.plane = plane;
     this.pixelsDirty = true;
   }
@@ -77,70 +151,71 @@ export class Viewport {
     this.oy = this.cssH / 2 - (p.h * this.ky) / 2 + this.panY;
   }
 
-  toScreen(u, v) {
+  toScreen(u: number, v: number): [number, number] {
     return [this.ox + u * this.kx, this.oy + v * this.ky];
   }
 
-  toImage(X, Y) {
+  toImage(X: number, Y: number): [number, number] {
     return [(X - this.ox) / this.kx, (Y - this.oy) / this.ky];
   }
 
-  inside(u, v) {
-    return this.plane && u >= 0 && v >= 0 && u < this.plane.w && v < this.plane.h;
+  inside(u: number, v: number) {
+    return !!this.plane && u >= 0 && v >= 0 && u < this.plane.w && v < this.plane.h;
   }
 
-  remap(lut) {
-    const { w, h, data } = this.plane;
-    if (this.off.width !== w || this.off.height !== h || !this.img) {
+  remap(plane: Plane, lut: Uint32Array) {
+    const { w, h, data } = plane;
+    let img = this.img, out = this.img32;
+    if (this.off.width !== w || this.off.height !== h || !img || !out) {
       this.off.width = w;
       this.off.height = h;
-      this.img = this.offCtx.createImageData(w, h);
-      this.img32 = new Uint32Array(this.img.data.buffer);
+      img = this.img = this.offCtx.createImageData(w, h);
+      out = this.img32 = new Uint32Array(img.data.buffer);
     }
-    const out = this.img32;
     const n = w * h;
     const last = lut.length - 1;
     for (let i = 0; i < n; i++) {
       const v = data[i];
       out[i] = lut[v > last ? last : v];
     }
-    this.offCtx.putImageData(this.img, 0, 0);
+    this.offCtx.putImageData(img, 0, 0);
     this.pixelsDirty = false;
   }
 
-  draw(lut) {
+  draw(lut: Uint32Array | null) {
     const ctx = this.ctx;
     const dpr = this.pixelRatio();
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, this.cssW, this.cssH);
-    if (!this.plane) {
+    const plane = this.plane;
+    if (!plane) {
       this.hooks.overlay(this, ctx);
       return;
     }
-    if (this.pixelsDirty) this.remap(lut);
+    if (this.pixelsDirty && lut) this.remap(plane, lut);
     this.layout();
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(this.off, this.ox, this.oy, this.plane.w * this.kx, this.plane.h * this.ky);
+    ctx.drawImage(this.off, this.ox, this.oy, plane.w * this.kx, plane.h * this.ky);
     this.hooks.overlay(this, ctx);
   }
 
-  eventPos(e) {
+  eventPos(e: { clientX: number; clientY: number }): Pos {
     const r = this.canvas.getBoundingClientRect();
     const X = e.clientX - r.left, Y = e.clientY - r.top;
     const [u, v] = this.plane ? this.toImage(X, Y) : [0, 0];
     return { X, Y, u, v };
   }
 
-  zoomAt(factor, X, Y) {
+  zoomAt(factor: number, X: number, Y: number) {
     if (!this.plane) return;
     this.layout();
     this.zoomTo(this.zoom * factor, this.toImage(X, Y), X, Y);
   }
 
   // Zoom so that image point (u, v) lands on screen point (X, Y).
-  zoomTo(zoom, [u, v], X, Y) {
+  zoomTo(zoom: number, [u, v]: [number, number], X: number, Y: number) {
     this.zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom));
     this.layout();
     const [X2, Y2] = this.toScreen(u, v);
@@ -150,15 +225,15 @@ export class Viewport {
   }
 
   // The image point under the fingers stays under them while they pinch and move.
-  startPinch(pair) {
+  startPinch(pair: { x: number; y: number; dist: number }) {
     this.layout();
     const r = this.canvas.getBoundingClientRect();
     this.pinch = { dist: pair.dist, zoom: this.zoom, anchor: this.toImage(pair.x - r.left, pair.y - r.top) };
   }
 
-  movePinch(pair) {
+  movePinch(pinch: { dist: number; zoom: number; anchor: [number, number] }, pair: { x: number; y: number; dist: number }) {
     const r = this.canvas.getBoundingClientRect();
-    this.zoomTo(this.pinch.zoom * (pair.dist / this.pinch.dist), this.pinch.anchor, pair.x - r.left, pair.y - r.top);
+    this.zoomTo(pinch.zoom * (pair.dist / pinch.dist), pinch.anchor, pair.x - r.left, pair.y - r.top);
   }
 
   // Abandon a tool gesture, e.g. when a second finger turns it into a pinch.
@@ -172,7 +247,6 @@ export class Viewport {
     const c = this.canvas;
     const touches = new Touches();
     let pointerType = 'mouse';
-    this.pinch = null;
     c.addEventListener('contextmenu', (e) => e.preventDefault());
 
     c.addEventListener('pointerdown', (e) => {
@@ -202,14 +276,15 @@ export class Viewport {
       this.hover = pos;
       touches.move(e);
       if (this.pinch) {
-        if (touches.count >= 2) this.movePinch(touches.pair());
+        if (touches.count >= 2) this.movePinch(this.pinch, touches.pair());
         return;
       }
-      if (this.drag) {
-        const dx = pos.X - this.drag.lastX, dy = pos.Y - this.drag.lastY;
-        this.drag.lastX = pos.X;
-        this.drag.lastY = pos.Y;
-        switch (this.drag.mode) {
+      const drag = this.drag;
+      if (drag) {
+        const dx = pos.X - drag.lastX, dy = pos.Y - drag.lastY;
+        drag.lastX = pos.X;
+        drag.lastY = pos.Y;
+        switch (drag.mode) {
           case 'pan':
             this.panX += dx;
             this.panY += dy;
@@ -223,21 +298,21 @@ export class Viewport {
             break;
           case 'scroll':
             // Like the wheel: dragging down moves as scrolling down does.
-            this.drag.scrolled += dy;
-            while (Math.abs(this.drag.scrolled) >= SCROLL_PX) {
-              const dir = Math.sign(this.drag.scrolled);
-              this.drag.scrolled -= dir * SCROLL_PX;
+            drag.scrolled += dy;
+            while (Math.abs(drag.scrolled) >= SCROLL_PX) {
+              const dir = Math.sign(drag.scrolled);
+              drag.scrolled -= dir * SCROLL_PX;
               this.hooks.scroll(this, dir);
             }
             break;
           default:
-            this.hooks.dragMove(this, this.drag.mode, pos, e);
+            this.hooks.dragMove(this, drag.mode, pos, e);
         }
       }
       this.hooks.hover(this, pos);
     });
 
-    const release = (e) => {
+    const release = (e: PointerEvent) => {
       const double = touches.up(e);
       if (this.pinch) {
         // The pinch lasts until every finger is lifted, so the last one does not start a tool.

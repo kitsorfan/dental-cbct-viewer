@@ -84,32 +84,35 @@ Compressed DICOM (JPEG, JPEG 2000, JPEG-LS, RLE) is not supported yet; the viewe
 
 ## Development
 
-There are no dependencies; Node 22 or newer is needed only for the tests and the build.
+The viewer is written in TypeScript and has no runtime dependencies. Node 24 or newer runs the dev server, the tests and the build directly from the `.ts` sources, using Node's built-in type stripping, so they need no packages. The TypeScript compiler is a development dependency used only to check the types (strict mode); install it with `npm ci`.
 
 ```sh
-npm run dev     # serve the source at http://127.0.0.1:8080
-npm test        # unit tests: DICOM parsing and limits, ZIP reading, reformatting, PDF writer, translations, build and CSP
-npm run build   # bundle everything into dist/index.html
+npm run dev        # serve the source at http://127.0.0.1:8080
+npm test           # unit tests: DICOM parsing and limits, ZIP reading, reformatting, PDF writer, translations, build and CSP
+npm run typecheck  # strict type checking of the browser code (tsconfig.json) and of the tests and scripts (tsconfig.node.json)
+npm run build      # bundle everything into dist/index.html
 ```
+
+Only erasable TypeScript is used (no enums or namespaces), since the types are stripped rather than compiled.
 
 The tests generate their DICOM files in memory, so no patient data is needed or stored in the repository. `.gitignore` also blocks `.dcm` files, `DICOMDIR` and report PDFs.
 
 | File | Purpose |
 |---|---|
-| `src/dicom.js` | DICOM parsing with input limits, series grouping, volume assembly, CS 3D Imaging analysis files |
-| `src/zip.js` | Reads scans straight from ZIP archives (stored, deflated, ZIP64) without unpacking them |
-| `src/reslice.js` | Orthogonal, panoramic and cross-sectional reformatting |
-| `src/autoarch.js` | Finds the dental arch from the teeth when a scan has no analysis |
-| `src/viewport.js` | 2D view rendering, zoom/pan and input |
-| `src/vr.js` | WebGL2 ray-marched 3D rendering |
-| `src/touch.js` | Finger tracking shared by the views: pinch and double-tap |
-| `src/report.js`, `src/pdf.js` | PDF report layout and a small PDF writer |
-| `src/phantom.js` | Synthetic demo scan |
-| `src/i18n.js` | English, Greek and French strings, including the guide, privacy and terms pages |
-| `src/app.js` | Application state, overlays, tools, help centre and exports |
-| `scripts/build.mjs` | Inlines everything into one HTML file and pins the script hash in the CSP |
+| `src/dicom.ts` | DICOM parsing with input limits, series grouping, volume assembly, CS 3D Imaging analysis files |
+| `src/zip.ts` | Reads scans straight from ZIP archives (stored, deflated, ZIP64) without unpacking them |
+| `src/reslice.ts` | Orthogonal, panoramic and cross-sectional reformatting |
+| `src/autoarch.ts` | Finds the dental arch from the teeth when a scan has no analysis |
+| `src/viewport.ts` | 2D view rendering, zoom/pan and input |
+| `src/vr.ts` | WebGL2 ray-marched 3D rendering |
+| `src/touch.ts` | Finger tracking shared by the views: pinch and double-tap |
+| `src/report.ts`, `src/pdf.ts` | PDF report layout and a small PDF writer |
+| `src/phantom.ts` | Synthetic demo scan |
+| `src/i18n.ts` | English, Greek and French strings, including the guide, privacy and terms pages |
+| `src/app.ts` | Application state, overlays, tools, help centre and exports |
+| `scripts/build.ts` | Strips the types, inlines everything into one HTML file and pins the script hash in the CSP |
 
-Pushing to `main` runs the tests and deploys the built page to GitHub Pages. Pushing a `v*` tag attaches `dental-cbct-viewer.html` to a GitHub release.
+Pushing to `main` checks the types, runs the tests and deploys the built page to GitHub Pages. Pushing a `v*` tag attaches `dental-cbct-viewer.html` to a GitHub release.
 
 ## Disclaimer
 

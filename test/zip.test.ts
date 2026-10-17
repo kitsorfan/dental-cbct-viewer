@@ -1,14 +1,22 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import zlib from 'node:zlib';
-import { scanEntries, loadSeries, DicomError } from '../src/dicom.js';
-import { expandArchives, readZipDirectory } from '../src/zip.js';
-import { writeDicom, ctSlice, fileEntry } from './dicom-writer.mjs';
+import { scanEntries, loadSeries, DicomError } from '../src/dicom.ts';
+import { expandArchives, readZipDirectory } from '../src/zip.ts';
+import { writeDicom, ctSlice, fileEntry } from './dicom-writer.ts';
+
+interface ZipFile {
+  name: string;
+  data: Uint8Array;
+  method?: number;
+  flags?: number;
+  size?: number;
+}
 
 // Builds a ZIP in memory. files: [{ name, data, method = 8, flags = 0, size }]; `size` overrides
 // the declared uncompressed size. zip64 writes every size and offset through ZIP64 records.
-function makeZip(files, { zip64 = false } = {}) {
-  const parts = [], central = [];
+function makeZip(files: ZipFile[], { zip64 = false } = {}) {
+  const parts: Buffer[] = [], central: Buffer[] = [];
   let offset = 0;
   for (const f of files) {
     const name = Buffer.from(f.name);
@@ -49,7 +57,7 @@ function makeZip(files, { zip64 = false } = {}) {
     offset += 30 + name.length + body.length;
   }
   const cd = Buffer.concat(central);
-  const tail = [];
+  const tail: Buffer[] = [];
   if (zip64) {
     const z = Buffer.alloc(56);
     z.writeUInt32LE(0x06064b50, 0);
@@ -74,7 +82,7 @@ function makeZip(files, { zip64 = false } = {}) {
 }
 
 // 400 × 400 slices are larger than the reader's header window, so pixel reads inflate whole entries.
-const slice = (z) => writeDicom(ctSlice({ rows: 400, cols: 400, z, instance: z + 1 }));
+const slice = (z: number) => writeDicom(ctSlice({ rows: 400, cols: 400, z, instance: z + 1 }));
 const scanFiles = () => [
   { name: 'Patient/Data/s2.dcm', data: slice(2) },
   { name: 'Patient/Data/s0.dcm', data: slice(0), method: 0 },
@@ -83,7 +91,7 @@ const scanFiles = () => [
   { name: '__MACOSX/Patient/Data/._s0.dcm', data: new Uint8Array(200) },
 ];
 
-async function openZip(bytes) {
+async function openZip(bytes: Uint8Array<ArrayBuffer>) {
   const entries = await expandArchives([fileEntry(bytes, 'scan.zip')]);
   const [series] = await scanEntries(entries);
   return { entries, series, ...(await loadSeries(series)) };
@@ -121,7 +129,7 @@ test('never inflates more than an entry declares', async () => {
 });
 
 test('refuses encrypted, damaged and non-ZIP files with a clear error', async () => {
-  const code = (c) => (err) => err instanceof DicomError && err.code === c;
+  const code = (c: string) => (err: unknown) => err instanceof DicomError && err.code === c;
   const encrypted = makeZip([{ name: 'a.dcm', data: slice(0), flags: 1 }]);
   await assert.rejects(expandArchives([fileEntry(encrypted, 'a.zip')]), code('zipEncrypted'));
 
@@ -130,7 +138,7 @@ test('refuses encrypted, damaged and non-ZIP files with a clear error', async ()
   await assert.rejects(readZipDirectory(new File([good.slice(0, good.length - 30)], 'cut.zip')), code('zip'));
 
   // Rewrite the compression method in both the local and the central header of a one-file archive.
-  const withMethod = (zip, method) => {
+  const withMethod = (zip: Uint8Array<ArrayBuffer>, method: number) => {
     const cd = Buffer.from(zip).indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
     zip.set([method, 0], 8);
     zip.set([method, 0], cd + 10);

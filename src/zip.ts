@@ -2,7 +2,8 @@
 // to disk: entries are read on demand, stored ones sliced from the archive and deflated ones
 // inflated by the browser's own DecompressionStream. Handles ZIP64; encryption is refused.
 
-import { DicomError, LIMITS } from './dicom.js';
+import { DicomError, LIMITS } from './dicom.ts';
+import type { Entry, FileLike, Readable } from './dicom.ts';
 
 const EOCD = 0x06054b50, ZIP64_LOCATOR = 0x07064b50, ZIP64_EOCD = 0x06064b50;
 const CENTRAL = 0x02014b50, LOCAL = 0x04034b50;
@@ -14,20 +15,30 @@ const PREFIX = 256 * 1024;
 // is inflated once rather than once per frame.
 const KEEP_MS = 1000;
 
-async function view(blob, start, end) {
+// One file as the central directory describes it.
+export interface ZipRecord {
+  name: string;
+  flags: number;
+  method: number;
+  compressed: number;
+  size: number;
+  offset: number;
+}
+
+async function view(blob: Blob, start: number, end: number) {
   return new DataView(await blob.slice(start, end).arrayBuffer());
 }
 
 // Inflate raw deflate data, stopping after `length` bytes: a damaged or hostile entry cannot
 // produce more than it declared.
-async function inflate(blob, length) {
-  let stream;
+async function inflate(blob: Blob, length: number) {
+  let stream: ReadableStream<Uint8Array>;
   try {
     stream = blob.stream().pipeThrough(new DecompressionStream('deflate-raw'));
   } catch {
     throw new DicomError('zipUnsupported');
   }
-  let out;
+  let out: Uint8Array<ArrayBuffer>;
   try {
     out = new Uint8Array(length);
   } catch {
@@ -52,9 +63,9 @@ async function inflate(blob, length) {
   return out.buffer;
 }
 
-let kept = null; // { entry, promise, timer }
+let kept: { entry: ZipEntry; promise: Promise<ArrayBuffer>; timer?: ReturnType<typeof setTimeout> } | null = null;
 
-function inflateWhole(entry) {
+function inflateWhole(entry: ZipEntry) {
   if (kept?.entry !== entry) {
     if (kept) clearTimeout(kept.timer);
     kept = { entry, promise: entry.raw().then((raw) => inflate(raw, entry.size)) };
@@ -66,15 +77,21 @@ function inflateWhole(entry) {
 }
 
 // A file inside the archive with the parts of the File interface the DICOM reader uses.
-class ZipEntry {
-  constructor(archive, record) {
+class ZipEntry implements FileLike {
+  readonly archive: Blob;
+  readonly record: ZipRecord;
+  readonly size: number;
+  readonly name: string;
+  private located?: Promise<Blob>;
+
+  constructor(archive: Blob, record: ZipRecord) {
     this.archive = archive;
     this.record = record;
     this.size = record.size;
     this.name = record.name.slice(record.name.lastIndexOf('/') + 1);
   }
 
-  slice(start = 0, end = this.size) {
+  slice(start = 0, end = this.size): Readable & { size: number } {
     return { size: Math.max(0, Math.min(end, this.size) - start), arrayBuffer: () => this.read(start, end) };
   }
 
@@ -88,7 +105,7 @@ class ZipEntry {
 
   // The compressed bytes. The local header is read for the data offset, since its extra
   // field may differ from the central directory's.
-  raw() {
+  raw(): Promise<Blob> {
     this.located ??= (async () => {
       const { offset, compressed } = this.record;
       const h = await view(this.archive, offset, offset + 30);
@@ -100,7 +117,7 @@ class ZipEntry {
     return this.located;
   }
 
-  async read(start, end) {
+  async read(start: number, end: number): Promise<ArrayBuffer> {
     start = Math.max(0, Math.min(start, this.size));
     end = Math.max(start, Math.min(end, this.size));
     const { flags, method } = this.record;
@@ -115,7 +132,7 @@ class ZipEntry {
 }
 
 // The central directory: one record per file, with ZIP64 sizes and offsets resolved.
-export async function readZipDirectory(file) {
+export async function readZipDirectory(file: Blob): Promise<ZipRecord[]> {
   const tailStart = Math.max(0, file.size - (22 + 0xffff + 20));
   const tail = await view(file, tailStart, file.size);
   let at = -1;
@@ -139,14 +156,14 @@ export async function readZipDirectory(file) {
 
   const cd = await view(file, offset, offset + size);
   const names = new TextDecoder();
-  const records = [];
+  const records: ZipRecord[] = [];
   try {
     let p = 0;
     for (let n = 0; n < count; n++) {
       if (cd.getUint32(p, true) !== CENTRAL) throw new DicomError('zip');
       const nameLength = cd.getUint16(p + 28, true);
       const extraLength = cd.getUint16(p + 30, true);
-      const record = {
+      const record: ZipRecord = {
         name: names.decode(new Uint8Array(cd.buffer, p + 46, nameLength)).replace(/\\/g, '/'),
         flags: cd.getUint16(p + 8, true),
         method: cd.getUint16(p + 10, true),
@@ -160,7 +177,7 @@ export async function readZipDirectory(file) {
         const id = cd.getUint16(e, true), length = cd.getUint16(e + 2, true);
         if (id === 1) {
           let q = e + 4;
-          for (const key of ['size', 'compressed', 'offset']) {
+          for (const key of ['size', 'compressed', 'offset'] as const) {
             if (record[key] !== MAX32) continue;
             if (q + 8 > e + 4 + length) throw new DicomError('zip');
             record[key] = Number(cd.getBigUint64(q, true));
@@ -179,10 +196,10 @@ export async function readZipDirectory(file) {
 }
 
 // Replace each .zip among the opened entries with the files inside it.
-export async function expandArchives(entries) {
-  const out = [];
+export async function expandArchives(entries: Entry[]): Promise<Entry[]> {
+  const out: Entry[] = [];
   for (const e of entries) {
-    if (!/\.zip$/i.test(e.path)) {
+    if (!/\.zip$/i.test(e.path) || !(e.file instanceof Blob)) {
       out.push(e);
       continue;
     }

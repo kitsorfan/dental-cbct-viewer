@@ -4,7 +4,21 @@
 // 3. Cast rays from inside the U towards the front and sides, take the density-weighted
 //    distance along each ray, smooth, and return control points for buildArch().
 
-function percentileOf(data, q, stride = 7) {
+import type { Point, Volume } from './reslice.ts';
+
+// Intermediate values, for tests and diagnostics.
+export interface ArchInfo {
+  high?: number;
+  peak?: number;
+  slab?: number[];
+  mid?: number;
+  centre?: number[];
+  radii?: (number | null)[];
+  run?: number[];
+  length?: number;
+}
+
+function percentileOf(data: Uint16Array, q: number, stride = 7) {
   const hist = new Uint32Array(65536);
   let n = 0;
   for (let i = 0; i < data.length; i += stride) { hist[data[i]]++; n++; }
@@ -14,10 +28,10 @@ function percentileOf(data, q, stride = 7) {
   return 65535;
 }
 
-function smooth(values, radius) {
+function smooth(values: number[], radius: number) {
   const out = values.slice();
   for (let i = 0; i < values.length; i++) {
-    const win = [];
+    const win: number[] = [];
     for (let k = -radius; k <= radius; k++) {
       const v = values[i + k];
       if (v !== undefined && !Number.isNaN(v)) win.push(v);
@@ -31,7 +45,7 @@ function smooth(values, radius) {
 
 // Returns { points: [[x, y, z], ...] } in voxel coordinates, or null if no arch is found.
 // `info` collects intermediate values for tests and diagnostics.
-export function detectArch(vol, info = {}) {
+export function detectArch(vol: Volume, info: ArchInfo = {}): { points: Point[]; slab: [number, number] } | null {
   const { data, nx, ny, nz, sx } = vol;
   const nxy = nx * ny;
 
@@ -85,8 +99,8 @@ export function detectArch(vol, info = {}) {
   const rMax = Math.ceil(Math.hypot(nx, ny));
   const band = Math.max(2, Math.round(6 / sx));
   const minMass = 4 * ((zB - zA) / zStep + 1);
-  const angles = [];
-  const radii = [];
+  const angles: number[] = [];
+  const radii: number[] = [];
   const prof = new Float32Array(rMax);
   for (let deg = -115; deg <= 115; deg += 2.5) {
     const a = (deg * Math.PI) / 180;
@@ -115,7 +129,7 @@ export function detectArch(vol, info = {}) {
 
   // Gaps between teeth or a missing tooth leave short holes: bridge them. Rays that jump
   // away from their neighbours (another structure) are dropped and bridged too.
-  const bridge = (values, maxGap) => {
+  const bridge = (values: number[], maxGap: number) => {
     const out = values.slice();
     for (let i = 0; i < out.length;) {
       if (!Number.isNaN(out[i])) { i++; continue; }
@@ -149,7 +163,7 @@ export function detectArch(vol, info = {}) {
   const a = angles.slice(best[0], best[1] + 1);
 
   const zMid = (z0 + z1) / 2;
-  const points = [];
+  const points: Point[] = [];
   for (let i = 0; i < r.length; i += 3) {
     points.push([cx + Math.sin(a[i]) * r[i], cy - Math.cos(a[i]) * r[i], zMid]);
   }

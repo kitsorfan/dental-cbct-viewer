@@ -1,19 +1,23 @@
 // Minimal PDF writer: each page is one full-page JPEG. Text is drawn into the page image,
 // so any script (Greek included) works without embedding fonts.
 
-const A4 = [595.28, 841.89];
+const A4: [number, number] = [595.28, 841.89];
 
-function bytes(str) {
+export interface PdfPage { jpeg: Uint8Array<ArrayBuffer>; width: number; height: number }
+
+interface PdfInfo { title?: string; author?: string; creator?: string; size?: [number, number]; date?: Date }
+
+function bytes(str: string) {
   const out = new Uint8Array(str.length);
   for (let i = 0; i < str.length; i++) out[i] = str.charCodeAt(i) & 0xff;
   return out;
 }
 
 // PDF text string as UTF-16BE hex, which accepts any Unicode text.
-function textString(str) {
+function textString(str: string) {
   let hex = 'FEFF';
   for (const ch of String(str)) {
-    const code = ch.codePointAt(0);
+    const code = ch.codePointAt(0) ?? 0;
     const units = code > 0xffff
       ? [0xd800 + ((code - 0x10000) >> 10), 0xdc00 + ((code - 0x10000) & 0x3ff)]
       : [code];
@@ -22,22 +26,22 @@ function textString(str) {
   return `<${hex}>`;
 }
 
-function pdfDate(d) {
-  const p = (n) => String(n).padStart(2, '0');
+function pdfDate(d: Date) {
+  const p = (n: number) => String(n).padStart(2, '0');
   return `(D:${d.getUTCFullYear()}${p(d.getUTCMonth() + 1)}${p(d.getUTCDate())}${p(d.getUTCHours())}${p(d.getUTCMinutes())}${p(d.getUTCSeconds())}Z)`;
 }
 
-// pages: [{ jpeg: Uint8Array, width, height }] (pixel size of each JPEG)
-export function buildPdf(pages, { title = '', author = '', creator = '', size = A4, date = new Date() } = {}) {
-  const chunks = [];
-  const offsets = [];
+// width and height are the pixel size of each JPEG.
+export function buildPdf(pages: PdfPage[], { title = '', author = '', creator = '', size = A4, date = new Date() }: PdfInfo = {}) {
+  const chunks: Uint8Array<ArrayBuffer>[] = [];
+  const offsets: number[] = [];
   let length = 0;
-  const push = (data) => {
+  const push = (data: string | Uint8Array<ArrayBuffer>) => {
     const b = typeof data === 'string' ? bytes(data) : data;
     chunks.push(b);
     length += b.length;
   };
-  const object = (n, write) => {
+  const object = (n: number, write: () => void) => {
     offsets[n] = length;
     push(`${n} 0 obj\n`);
     write();

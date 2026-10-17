@@ -8,7 +8,10 @@ export const LANGUAGES = [
   { id: 'fr', name: 'Français', locale: 'fr-FR' },
 ];
 
-export const STRINGS = {
+// Placeholders such as {n} are filled in by t().
+export type Vars = Record<string, string | number | undefined>;
+
+export const STRINGS: Record<string, Record<string, string>> = {
   en: {
     'app.name': 'Dental CBCT Viewer',
     'open': 'Open scan…',
@@ -806,18 +809,18 @@ export function detectLanguage() {
   return 'en';
 }
 
-export function t(key, vars = {}) {
+export function t(key: string, vars: Vars = {}) {
   const s = STRINGS[lang][key] ?? STRINGS.en[key] ?? key;
-  return s.replace(/\{(\w+)\}/g, (_, k) => (vars[k] ?? ''));
+  return s.replace(/\{(\w+)\}/g, (_, k: string) => String(vars[k] ?? ''));
 }
 
-export function setLanguage(next, root = document) {
+export function setLanguage(next: string, root = document) {
   lang = STRINGS[next] ? next : 'en';
   root.documentElement.lang = lang;
-  root.querySelectorAll('[data-i18n]').forEach((el) => { el.textContent = t(el.dataset.i18n); });
-  root.querySelectorAll('[data-i18n-html]').forEach((el) => { el.innerHTML = t(el.dataset.i18nHtml); });
-  root.querySelectorAll('[data-i18n-title]').forEach((el) => { el.title = t(el.dataset.i18nTitle); });
-  root.querySelectorAll('[data-i18n-aria]').forEach((el) => { el.setAttribute('aria-label', t(el.dataset.i18nAria)); });
+  root.querySelectorAll<HTMLElement>('[data-i18n]').forEach((el) => { el.textContent = t(el.dataset.i18n ?? ''); });
+  root.querySelectorAll<HTMLElement>('[data-i18n-html]').forEach((el) => { el.innerHTML = t(el.dataset.i18nHtml ?? ''); });
+  root.querySelectorAll<HTMLElement>('[data-i18n-title]').forEach((el) => { el.title = t(el.dataset.i18nTitle ?? ''); });
+  root.querySelectorAll<HTMLElement>('[data-i18n-aria]').forEach((el) => { el.setAttribute('aria-label', t(el.dataset.i18nAria ?? '')); });
 }
 
 // Keep the choice in the address bar so a reload or shared link keeps it; nothing is stored.

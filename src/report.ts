@@ -1,6 +1,65 @@
 // A4 PDF report composed on canvases (drawn in millimetres) and written with pdf.js.
-import { buildPdf } from './pdf.js';
-import { drawLogo, ACCENT } from './brand.js';
+import { buildPdf } from './pdf.ts';
+import type { PdfPage } from './pdf.ts';
+import { drawLogo, ACCENT } from './brand.ts';
+
+type Image = CanvasImageSource | null;
+
+export interface Tile {
+  title: string;
+  subtitle?: string;
+  render: (w: number, h: number) => Image;
+}
+
+// One serial cross-section: its sample on the arch, its number and its position text.
+export interface CrossItem {
+  index: number;
+  label: number;
+  detail: string;
+}
+
+export interface Column {
+  label: string;
+  width: number;
+  align?: CanvasTextAlign;
+}
+
+// Everything the report needs, gathered by the app (see app.ts createPdfReport).
+// Sizes passed to the render callbacks are in millimetres.
+export interface ReportInput {
+  appName: string;
+  documentTitle: string;
+  patient: string;
+  created: string;
+  banner: string;
+  disclaimer: string;
+  pageLabel: (n: number, total: number) => string;
+  titles: { overview: string };
+  info: [string, string][];
+  pano: {
+    title: string;
+    subtitle: string;
+    aspect: number;
+    render: (w: number, h: number, extra?: { ticks?: CrossItem[]; compact?: boolean }) => Image;
+  } | null;
+  overviewTiles: Tile[];
+  cross: {
+    title: string;
+    subtitle: string;
+    range: (from: number, to: number, total: number) => string;
+    aspect: number;
+    items: CrossItem[];
+    render: (item: CrossItem, w: number, h: number) => Image;
+  } | null;
+  views: {
+    title: string;
+    tiles: Tile[];
+    measurementsTitle: string;
+    none: string;
+    columns: Column[];
+    measurements: string[][];
+  };
+}
 
 const DPI = 180;
 const PX = DPI / 25.4;
@@ -15,9 +74,9 @@ const FONT = '"Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, san
 const INK = '#16202a';
 const MUTED = '#5b6876';
 const RULE = '#d5dbe1';
-const pt = (n) => n * 0.3528;
+const pt = (n: number) => n * 0.3528;
 
-function font(size, weight = 400) {
+function font(size: number, weight = 400) {
   return `${weight} ${pt(size)}px ${FONT}`;
 }
 
@@ -25,7 +84,7 @@ function newPage() {
   const canvas = document.createElement('canvas');
   canvas.width = Math.round(PAGE[0] * PX);
   canvas.height = Math.round(PAGE[1] * PX);
-  const ctx = canvas.getContext('2d');
+  const ctx = canvas.getContext('2d')!;
   ctx.fillStyle = '#fff';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   ctx.scale(PX, PX);
@@ -33,8 +92,8 @@ function newPage() {
   return { canvas, ctx };
 }
 
-function wrap(ctx, text, maxWidth) {
-  const lines = [];
+function wrap(ctx: CanvasRenderingContext2D, text: string, maxWidth: number) {
+  const lines: string[] = [];
   let line = '';
   for (const word of String(text).split(/\s+/)) {
     const next = line ? `${line} ${word}` : word;
@@ -47,14 +106,14 @@ function wrap(ctx, text, maxWidth) {
   return lines;
 }
 
-function fitText(ctx, text, maxWidth) {
+function fitText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number) {
   let s = String(text);
   if (ctx.measureText(s).width <= maxWidth) return s;
   while (s.length > 1 && ctx.measureText(`${s}…`).width > maxWidth) s = s.slice(0, -1);
   return `${s}…`;
 }
 
-function header(ctx, r, title) {
+function header(ctx: CanvasRenderingContext2D, r: ReportInput, title: string) {
   drawLogo(ctx, M, M - 1, 10);
   ctx.fillStyle = ACCENT;
   ctx.font = font(8.5, 600);
@@ -83,7 +142,7 @@ function header(ctx, r, title) {
   return y;
 }
 
-function footer(ctx, r, n, total) {
+function footer(ctx: CanvasRenderingContext2D, r: ReportInput, n: number, total: number) {
   ctx.fillStyle = RULE;
   ctx.fillRect(M, FOOTER_Y, CONTENT_W, 0.3);
   ctx.font = font(7);
@@ -95,7 +154,7 @@ function footer(ctx, r, n, total) {
   ctx.textAlign = 'left';
 }
 
-function caption(ctx, text, x, y, sub) {
+function caption(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, sub?: string) {
   ctx.fillStyle = INK;
   ctx.font = font(9.5, 700);
   ctx.fillText(text, x, y);
@@ -107,7 +166,7 @@ function caption(ctx, text, x, y, sub) {
   }
 }
 
-function imageBox(ctx, source, x, y, w, h) {
+function imageBox(ctx: CanvasRenderingContext2D, source: Image, x: number, y: number, w: number, h: number) {
   ctx.fillStyle = '#000';
   ctx.fillRect(x, y, w, h);
   if (source) ctx.drawImage(source, x, y, w, h);
@@ -116,7 +175,7 @@ function imageBox(ctx, source, x, y, w, h) {
   ctx.strokeRect(x, y, w, h);
 }
 
-function infoGrid(ctx, rows, y) {
+function infoGrid(ctx: CanvasRenderingContext2D, rows: [string, string][], y: number) {
   const colW = CONTENT_W / 2;
   const perCol = Math.ceil(rows.length / 2);
   rows.forEach(([key, value], i) => {
@@ -133,10 +192,10 @@ function infoGrid(ctx, rows, y) {
   return y + perCol * 5.6;
 }
 
-function table(ctx, rows, cols, x, y, maxY) {
+function table(ctx: CanvasRenderingContext2D, rows: string[][], cols: Column[], x: number, y: number, maxY: number) {
   const rowH = 5.4;
   const widths = cols.map((c) => c.width);
-  const drawRow = (cells, yy, head) => {
+  const drawRow = (cells: string[], yy: number, head: boolean) => {
     ctx.font = head ? font(8, 700) : font(9);
     ctx.fillStyle = head ? MUTED : INK;
     let xx = x;
@@ -163,17 +222,16 @@ function table(ctx, rows, cols, x, y, maxY) {
   return i;
 }
 
-const toJpeg = (canvas) => new Promise((resolve, reject) => {
+const toJpeg = (canvas: HTMLCanvasElement) => new Promise<PdfPage>((resolve, reject) => {
   canvas.toBlob(async (blob) => {
     if (!blob) { reject(new Error('Could not encode the report page')); return; }
     resolve({ jpeg: new Uint8Array(await blob.arrayBuffer()), width: canvas.width, height: canvas.height });
   }, 'image/jpeg', 0.9);
 });
 
-// r: everything the report needs, gathered by the app (see app.js createPdfReport).
-export async function createReport(r) {
-  const pages = [];
-  const mm = (w, h) => [w, h];
+export async function createReport(r: ReportInput) {
+  const pages: HTMLCanvasElement[] = [];
+  const mm = (w: number, h: number): [number, number] => [w, h];
 
   // Page 1: overview.
   {
@@ -203,8 +261,9 @@ export async function createReport(r) {
 
   // Serial cross-sections at a fixed interval along the whole arch, as many pages as needed.
   // Each page starts with a small panoramic marking the sections it holds.
-  if (r.cross) {
-    const items = r.cross.items;
+  if (r.cross && r.pano) { // serial sections are only made along a panoramic
+    const cross = r.cross;
+    const items = cross.items;
     const cols = 6, gap = 3, label = 4.6;
     const cw = (CONTENT_W - (cols - 1) * gap) / cols;
     const ch = cw / r.cross.aspect;
@@ -237,7 +296,7 @@ export async function createReport(r) {
         ctx.font = font(7);
         ctx.fillStyle = MUTED;
         ctx.fillText(item.detail, x + w + 1, yy + 2.6);
-        imageBox(ctx, r.cross.render(item, cw, ch), x, yy + label - 0.8, cw, ch);
+        imageBox(ctx, cross.render(item, cw, ch), x, yy + label - 0.8, cw, ch);
       });
       pages.push(canvas);
       start += pageItems.length;
@@ -280,12 +339,12 @@ export async function createReport(r) {
   }
 
   pages.forEach((canvas, i) => {
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext('2d')!;
     ctx.setTransform(PX, 0, 0, PX, 0, 0);
     footer(ctx, r, i + 1, pages.length);
   });
 
-  const encoded = [];
+  const encoded: PdfPage[] = [];
   for (const canvas of pages) encoded.push(await toJpeg(canvas));
   return buildPdf(encoded, { title: r.documentTitle, author: r.appName, creator: r.appName });
 }

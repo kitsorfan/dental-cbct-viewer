@@ -1,11 +1,13 @@
 // Synthetic dental CBCT for the demo, screenshots and tests: a lower jaw with teeth, a nerve
 // canal on each side and a matching CS 3D Imaging-style analysis. Shapes are simplified.
-import { volumeStats } from './dicom.js';
+import { volumeStats } from './dicom.ts';
+import type { ScanMeta } from './dicom.ts';
+import type { Point } from './reslice.ts';
 
 const FOV = [80, 80, 50]; // mm
 const CREST = 26; // alveolar crest height (mm)
 
-function hash(i) {
+function hash(i: number) {
   i = Math.imul(i ^ 0x9e3779b9, 0x85ebca6b);
   i ^= i >>> 13;
   i = Math.imul(i, 0xc2b2ae35);
@@ -13,26 +15,26 @@ function hash(i) {
 }
 
 // Smooth value noise on a unit lattice (trilinear with a smoothstep fade).
-function noise3(x, y, z) {
+function noise3(x: number, y: number, z: number) {
   const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
   const fx = x - xi, fy = y - yi, fz = z - zi;
   const ux = fx * fx * (3 - 2 * fx), uy = fy * fy * (3 - 2 * fy), uz = fz * fz * (3 - 2 * fz);
-  const v = (i, j, k) => hash(((xi + i) * 73856093) ^ ((yi + j) * 19349663) ^ ((zi + k) * 83492791));
-  const lerp = (a, b, t) => a + (b - a) * t;
+  const v = (i: number, j: number, k: number) => hash(((xi + i) * 73856093) ^ ((yi + j) * 19349663) ^ ((zi + k) * 83492791));
+  const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
   return lerp(
     lerp(lerp(v(0, 0, 0), v(1, 0, 0), ux), lerp(v(0, 1, 0), v(1, 1, 0), ux), uy),
     lerp(lerp(v(0, 0, 1), v(1, 0, 1), ux), lerp(v(0, 1, 1), v(1, 1, 1), ux), uy), uz);
 }
 
 // voxelsPerMm 4 gives the 0.25 mm demo; tests use a coarse 1 mm grid.
-export function makePhantom({ voxelsPerMm = 4 } = {}) {
+export function makePhantom({ voxelsPerMm = 4 } = {}): { meta: ScanMeta; data: Uint16Array } {
   const vox = 1 / voxelsPerMm;
   const [nx, ny, nz] = FOV.map((v) => Math.round(v * voxelsPerMm));
   const nxy = nx * ny;
 
   // Arch centre line (mm): a parabola, anterior at the front of the volume.
-  const archX = (u) => 40 + u;
-  const archY = (u) => 15 + 0.027 * u * u;
+  const archX = (u: number) => 40 + u;
+  const archY = (u: number) => 15 + 0.027 * u * u;
   const samples = 480;
   const ax = new Float32Array(samples), ay = new Float32Array(samples), as = new Float32Array(samples);
   const anx = new Float32Array(samples), any = new Float32Array(samples);
@@ -46,7 +48,7 @@ export function makePhantom({ voxelsPerMm = 4 } = {}) {
     any[i] = -tx / tl;
   }
   const L = as[samples - 1];
-  const at = (s) => {
+  const at = (s: number) => {
     let i = 0;
     while (i < samples - 2 && as[i + 1] < s) i++;
     const f = (s - as[i]) / (as[i + 1] - as[i] || 1);
@@ -54,7 +56,7 @@ export function makePhantom({ voxelsPerMm = 4 } = {}) {
   };
 
   // Teeth along the arch; one missing, one with a metal crown.
-  const teeth = [];
+  const teeth: { x: number; y: number; r: number; root: number; crown: number; metal: boolean }[] = [];
   for (let k = 0; k < 14; k++) {
     if (k === 10) continue;
     const s = L * (0.07 + (0.86 * k) / 13);
@@ -72,9 +74,9 @@ export function makePhantom({ voxelsPerMm = 4 } = {}) {
 
   // Nerve canals run inside the bone from the back of the jaw to the premolar region.
   const canalEnd = L * 0.27;
-  const canalZ = (t) => 11.5 + 4 * (1 - t) * (1 - t); // t: 0 at the back, 1 at the front
+  const canalZ = (t: number) => 11.5 + 4 * (1 - t) * (1 - t); // t: 0 at the back, 1 at the front
   const canals = [0, 1].map((side) => {
-    const points = [];
+    const points: Point[] = [];
     for (let k = 0; k <= 9; k++) {
       const t = k / 9;
       const s = side ? L - t * canalEnd : t * canalEnd;
@@ -118,7 +120,7 @@ export function makePhantom({ voxelsPerMm = 4 } = {}) {
   }
 
   const data = new Uint16Array(nxy * nz);
-  const store = (hu) => Math.max(0, Math.min(65535, Math.round(hu + 1000)));
+  const store = (hu: number) => Math.max(0, Math.min(65535, Math.round(hu + 1000)));
   const fovR = 39.5;
   for (let z = 0; z < nz; z++) {
     const pz = (z + 0.5) * vox;
@@ -147,7 +149,7 @@ export function makePhantom({ voxelsPerMm = 4 } = {}) {
         const ez = (pz - (CREST + bottom) / 2) / ((CREST - bottom) / 2), ed = d / halfWMap[p];
         const rho = Math.sqrt(ed * ed + ez * ez);
         if (rho <= 1.1) {
-          let bone;
+          let bone: number;
           if (rho > 0.82) bone = 1700;
           else {
             const n = 0.65 * noise3(px * 0.9, py * 0.9, pz * 0.9) + 0.35 * noise3(px * 2.2, py * 2.2, pz * 2.2);
@@ -190,14 +192,14 @@ export function makePhantom({ voxelsPerMm = 4 } = {}) {
     }
   }
 
-  const archPoints = [];
+  const archPoints: Point[] = [];
   for (let k = 0; k <= 8; k++) {
     const [x, y] = at(L * (0.03 + (0.94 * k) / 8));
     archPoints.push([x / vox - 0.5, y / vox - 0.5, 22 / vox]);
   }
   const stats = volumeStats(data, nx, ny, nz);
   const today = new Date();
-  const p2 = (n) => String(n).padStart(2, '0');
+  const p2 = (n: number) => String(n).padStart(2, '0');
 
   return {
     meta: {
