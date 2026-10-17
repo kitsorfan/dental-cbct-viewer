@@ -31,6 +31,7 @@ const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v
 
 const REPO_URL = 'https://github.com/kitsorfan/dental-cbct-viewer';
 const CREATOR = 'Kitsos Orfanopoulos';
+const CREATOR_SITE = { url: 'https://www.kitsorfan.com', label: 'www.kitsorfan.com' };
 // Real anonymized scan (CC BY 4.0), offered as a download so the page itself never connects anywhere.
 const DEMO_SCAN = { url: `${REPO_URL}/releases/download/demo-data/dental-cbct-demo-kavo.zip`, size: '91 MB' };
 const CROSS_STEPS = [0.5, 1, 2, 5]; // mm
@@ -1459,7 +1460,12 @@ function routeHash() {
 function renderAbout() {
   $('#welcomeRealLabel').textContent = t('welcome.real', { size: DEMO_SCAN.size });
   $('#aboutVersion').textContent = t('about.version', { v: document.documentElement.dataset.version || 'dev' });
-  $('#aboutCreator').textContent = t('about.creator', { name: CREATOR });
+  const site = document.createElement('a');
+  site.href = CREATOR_SITE.url;
+  site.target = '_blank';
+  site.rel = 'noopener noreferrer';
+  site.textContent = CREATOR_SITE.label;
+  $('#aboutCreator').replaceChildren(`${t('about.creator', { name: CREATOR })} (`, site, ')');
 }
 
 // The live privacy panel reports what the browser itself says about this page.
