@@ -142,7 +142,13 @@ interface State {
   hoverKind: ViewKind | null;
   vrRange: number[];
   message: { key: string; vars: Vars | (() => Vars) } | null;
+  // Where the scan opened; Reset returns there. frontZ: the opening cursor sits on the
+  // front of a found arch at this height (set once that arch is built).
+  start: { cursor: number[]; archIdx: number; frontZ: number | null } | null;
 }
+
+// View settings every scan opens with.
+const DEFAULTS = { panoThick: 8, panoMode: 'avg' as PanoMode, csStep: 1, csWidth: 40 };
 
 const S: State = {
   series: [],
@@ -159,12 +165,9 @@ const S: State = {
   archIdx: -1,
   arch: null,
   panoOffset: 0,
-  panoThick: 8,
-  panoMode: 'avg',
+  ...DEFAULTS,
   csIndex: 0,
   csMm: 0,
-  csStep: 1,
-  csWidth: 40,
   canals: [],
   measures: [],
   measuring: null,
@@ -175,6 +178,7 @@ const S: State = {
   hoverKind: null,
   vrRange: [0, 1],
   message: null,
+  start: null,
 };
 
 const views = {} as Record<ViewKind, Viewport>;
@@ -1266,9 +1270,9 @@ function bindUi() {
   guides.addEventListener('change', () => { S.showGuides = guides.checked; requestDraw(); });
   $('#clearMeasures').addEventListener('click', () => { S.measures = []; S.angleDraft = null; requestDraw(); });
   $('#resetViews').addEventListener('click', () => {
-    KINDS_2D.forEach((k) => views[k].resetView());
-    if (vr && !vr.failed) { vr.reset(); vr.render(); }
-    requestDraw();
+    const work = S.measures.length > 0 || S.arches.some((a) => a.custom);
+    if (work && !confirm(t('reset.confirm'))) return;
+    restoreOpeningState();
   });
   $('#snapshotBtn').addEventListener('click', saveLayout);
   $('#reportBtn').addEventListener('click', createPdfReport);
@@ -1534,7 +1538,7 @@ async function renderPrivacy() {
 function closeScan() {
   Object.assign(S, {
     vol: null, meta: null, lut: null, series: [], arches: [], arch: null, archIdx: -1, canals: [],
-    measures: [], measuring: null, drawing: null, angleDraft: null,
+    measures: [], measuring: null, drawing: null, angleDraft: null, start: null,
   });
   fillSeries();
   fillArchSelect();
@@ -1644,11 +1648,6 @@ function setVolume(meta: ScanMeta, data: Uint16Array) {
   const vol = S.vol = { data, nx, ny, nz, sx, sy, sz, slope: meta.slope, intercept: meta.intercept, max: Math.max(meta.max, 1) };
   const an = meta.analysis;
 
-  setCursor(an?.ortho ? an.ortho.slice() : [nx / 2, ny / 2, nz / 2]);
-  S.measures = [];
-  S.drawing = null;
-  S.angleDraft = null;
-
   S.canals = (an?.canals ?? []).map((c) => ({
     name: c.name,
     radiusMm: c.radius,
@@ -1670,29 +1669,75 @@ function setVolume(meta: ScanMeta, data: Uint16Array) {
 
   const scanner = an?.lut ?? meta.window;
   PRESETS.scanner = scanner ? { c: scanner.center, w: scanner.width } : { c: 1048, w: 4096 };
+  // The 3D view shows intensities from soft tissue up.
+  const lo = (-200 - vol.intercept) / vol.slope;
+  S.vrRange = [Math.max(0, lo), Math.max(lo + 1, meta.percentiles[1] * 1.05)];
 
-  KINDS_2D.forEach((k) => { views[k].sliceKey = null; views[k].resetView(); });
-  selectArch(idx);
-  if (auto && !an?.ortho && S.arch) {
-    // Start on the front teeth rather than the middle of the volume.
-    const m = S.arch.M >> 1;
-    setCursor([S.arch.x[m], S.arch.y[m], (auto.slab[0] + auto.slab[1]) / 2]);
-    refresh();
-  }
-  $<HTMLSelectElement>('#preset').value = 'bone';
-  applyPreset('bone');
+  S.start = {
+    cursor: an?.ortho ? an.ortho.slice() : [nx / 2, ny / 2, nz / 2],
+    archIdx: idx,
+    // A found arch with no saved position: start on the front teeth, not the middle of the volume.
+    frontZ: auto && !an?.ortho ? (auto.slab[0] + auto.slab[1]) / 2 : null,
+  };
+  restoreOpeningState();
 
   renderPatient();
   document.title = `${meta.demo ? t('patient.demo') : meta.patientName || 'CBCT'} – ${t('app.name')}`;
   if (meta.demo) setMessage('msg.demo');
-  else if (an?.arches?.length) setMessage('msg.loaded', { name: an.name, arches: S.arches.length, canals: S.canals.length });
   else if (auto) setMessage('msg.autoarch');
-  else setMessage('msg.noanalysis');
+  else if (!an?.arches?.length) setMessage('msg.noanalysis');
+  else setMessage(null); // a scan with its own analysis needs no remark
 
   $('#welcome').hidden = true;
   document.body.classList.add('has-scan');
   hideLoading();
   prepare3d();
+}
+
+// Everything as it was when the scan opened: views, slices, display settings, tools and
+// measurements. Loading a scan and Reset both end here.
+function restoreOpeningState() {
+  const start = S.start;
+  if (!S.vol || !start) return;
+  Object.assign(S, { ...DEFAULTS, invert: false, showCanals: true, showGuides: true });
+  S.measures = [];
+  S.measuring = null;
+  S.drawing = null;
+  S.angleDraft = null;
+  S.arches = S.arches.filter((a) => !a.custom);
+  syncControls();
+  setTool('navigate');
+  const max = document.querySelector<HTMLElement>('.view.maximized');
+  if (max) toggleMax(max);
+  showSecond('cross');
+
+  KINDS_2D.forEach((k) => { views[k].sliceKey = null; views[k].resetView(); });
+  setCursor(start.cursor);
+  selectArch(start.archIdx);
+  if (start.frontZ !== null && S.arch) {
+    const m = S.arch.M >> 1;
+    setCursor([S.arch.x[m], S.arch.y[m], start.frontZ]);
+    refresh();
+  }
+  $<HTMLSelectElement>('#preset').value = 'bone';
+  applyPreset('bone');
+  if (vr && !vr.failed) {
+    vr.reset();
+    $<HTMLSelectElement>('#vrPreset').value = 'bone';
+    applyVrPreset('bone');
+  }
+}
+
+// Bring the controls in line with state that was changed in code.
+function syncControls() {
+  $<HTMLInputElement>('#panoThick').value = String(S.panoThick);
+  $('#panoThickOut').textContent = `${S.panoThick} mm`;
+  $<HTMLSelectElement>('#panoMode').value = S.panoMode;
+  $<HTMLSelectElement>('#csStep').value = String(S.csStep);
+  $<HTMLSelectElement>('#csWidth').value = String(S.csWidth);
+  $('#invert').classList.toggle('active', S.invert);
+  $<HTMLInputElement>('#showCanals').checked = S.showCanals;
+  $<HTMLInputElement>('#showGuides').checked = S.showGuides;
 }
 
 // Built with text nodes only: values from the scan never reach innerHTML.
@@ -1730,11 +1775,8 @@ function renderPatient() {
 }
 
 function prepare3d() {
-  const view = vr, vol = S.vol, meta = S.meta;
-  if (!view || view.failed || !vol || !meta) { window.__viewerReady = true; return; }
-  const lo = (-200 - vol.intercept) / vol.slope;
-  const hi = meta.percentiles[1] * 1.05;
-  S.vrRange = [Math.max(0, lo), Math.max(lo + 1, hi)];
+  const view = vr, vol = S.vol;
+  if (!view || view.failed || !vol) { window.__viewerReady = true; return; }
   setTimeout(() => {
     view.setVolume(vol, S.vrRange[0], S.vrRange[1]);
     applyVrPreset($<HTMLSelectElement>('#vrPreset').value);
