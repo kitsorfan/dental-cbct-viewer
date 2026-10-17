@@ -60,6 +60,8 @@ export function build() {
   fs.mkdirSync(dist, { recursive: true });
   const out = path.join(dist, 'index.html');
   fs.writeFileSync(out, html);
+  // Served next to the page for link previews (og:image); the single-file download doesn't need it.
+  fs.copyFileSync(path.join(root, 'docs', 'social-preview.jpg'), path.join(dist, 'social-preview.jpg'));
   return { out, bytes: Buffer.byteLength(html) };
 }
 

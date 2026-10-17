@@ -88,4 +88,7 @@ test('the single-file build compiles and only its own script may run', () => {
   assert.doesNotMatch(csp, /'self'|https?:/);
   const { version } = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
   assert.ok(html.includes(`data-version="${version}"`), 'version stamped');
+
+  const image = html.match(/property="og:image" content="([^"]+)"/)?.[1] ?? '';
+  assert.ok(fs.existsSync(new URL(`../dist/${image.split('/').pop()}`, import.meta.url)), 'link preview image is published next to the page');
 });
