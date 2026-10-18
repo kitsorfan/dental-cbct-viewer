@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const src = path.join(root, 'src');
 const dist = path.join(root, 'dist');
-const MODULES = ['i18n.ts', 'brand.ts', 'reslice.ts', 'touch.ts', 'viewport.ts', 'vr.ts', 'dicom.ts', 'zip.ts', 'phantom.ts', 'autoarch.ts', 'pdf.ts', 'report.ts', 'app.ts'];
+const MODULES = ['i18n.ts', 'brand.ts', 'reslice.ts', 'touch.ts', 'viewport.ts', 'vr.ts', 'codecs.ts', 'dicom.ts', 'zip.ts', 'phantom.ts', 'autoarch.ts', 'pdf.ts', 'report.ts', 'app.ts'];
 const EXPORT = /^export\s+(?:async\s+)?(?:function\*?|class|const|let)\s+([A-Za-z_$][\w$]*)/gm;
 
 // Line endings are normalised so the script hash matches what the browser parses.
