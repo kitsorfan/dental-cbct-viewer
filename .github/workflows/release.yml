@@ -19,6 +19,16 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
+      # The About tab shows the version from package.json, so the tag must match it.
+      - name: Check the tag matches package.json
+        run: |
+          version="v$(node -p "require('./package.json').version")"
+          if [ "$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json ($version)"
+            exit 1
+          fi
+      - run: npm ci --ignore-scripts
+      - run: npm run typecheck
       - run: npm test
       - run: npm run build
       - run: cp dist/index.html dental-cbct-viewer.html
