@@ -2,7 +2,7 @@ import { Viewport } from './viewport.ts';
 import type { Pos, RenderExtras, ViewHooks, ViewKind } from './viewport.ts';
 import { VolumeView } from './vr.ts';
 import * as R from './reslice.ts';
-import type { Arch, CrossPlane, PanoMode, Plane, Point, Volume } from './reslice.ts';
+import type { Arch, CrossPlane, PanoCurve, PanoMode, Plane, Point, Volume } from './reslice.ts';
 import { DicomError, scanEntries, loadSeries, entriesFromDrop, entriesFromInput } from './dicom.ts';
 import type { Entry, ScanMeta, Series } from './dicom.ts';
 import { expandArchives } from './zip.ts';
@@ -71,6 +71,8 @@ interface ScanVolume extends Volume {
   max: number;
 }
 
+// half: on a cross-section, the plane's half-width when the measurement was drawn, so that a
+// later width change keeps it on the same anatomy.
 interface Distance {
   type: 'distance';
   kind: ViewKind;
@@ -79,6 +81,7 @@ interface Distance {
   b: number[];
   sx: number;
   sy: number;
+  half?: number;
 }
 
 interface Angle {
@@ -88,6 +91,7 @@ interface Angle {
   pts: number[][];
   sx: number;
   sy: number;
+  half?: number;
 }
 
 type Measure = Distance | Angle;
@@ -210,6 +214,30 @@ function volume(): ScanVolume {
 const mm = (v: number) => v / volume().sx;
 const rounded = () => S.cursor.map((v) => Math.round(v));
 
+// The panoramic's curve for the current arch and buccal/lingual offset.
+let curveMemo: { arch: Arch; offset: number; curve: PanoCurve } | null = null;
+function panoCurve(): PanoCurve | null {
+  const arch = S.arch;
+  if (!arch) return null;
+  if (curveMemo?.arch !== arch || curveMemo.offset !== S.panoOffset) {
+    curveMemo = { arch, offset: S.panoOffset, curve: R.panoCurve(arch, mm(S.panoOffset)) };
+  }
+  return curveMemo.curve;
+}
+
+// The panoramic column over a (fractional) arch sample.
+function panoColumn(at: number) {
+  const curve = panoCurve();
+  return curve ? R.panoColumn(curve, at) : at;
+}
+
+// Where a measurement drawn on an earlier cross-section width sits on the current one.
+function crossShift(vp: Viewport, m: { half?: number }) {
+  return vp.kind === 'cross' && m.half !== undefined && vp.plane ? (vp.plane as CrossPlane).half - m.half : 0;
+}
+
+const crossHalf = (vp: Viewport) => (vp.kind === 'cross' && vp.plane ? (vp.plane as CrossPlane).half : undefined);
+
 interface PlaneSource {
   key: string; // what is shown
   mkey: string; // which measurements belong to it
@@ -225,16 +253,17 @@ function planeFor(kind: ViewKind): PlaneSource {
     case 'coronal': return { key: `c${iy}`, mkey: `c${iy}`, make: () => R.coronal(vol, iy) };
     case 'sagittal': return { key: `s${ix}`, mkey: `s${ix}`, make: () => R.sagittal(vol, ix) };
     case 'pano': {
-      if (!arch) return { key: 'none', mkey: 'none', make: () => null };
+      const curve = panoCurve();
+      if (!curve) return { key: 'none', mkey: 'none', make: () => null };
       const mkey = `p${S.archIdx}:${S.panoOffset}`;
       return {
         key: `${mkey}:${S.panoThick}:${S.panoMode}`, mkey,
-        make: () => R.panoramic(vol, arch, mm(S.panoOffset), mm(S.panoThick), S.panoMode),
+        make: () => R.panoramic(vol, curve, mm(S.panoThick), S.panoMode),
       };
     }
     case 'cross': {
       if (!arch) return { key: 'none', mkey: 'none', make: () => null };
-      const mkey = `x${S.archIdx}:${S.csIndex}:${S.panoOffset}`;
+      const mkey = `x${S.archIdx}:${S.csMm.toFixed(3)}:${S.panoOffset}`;
       return {
         key: `${mkey}:${S.csWidth}`, mkey,
         make: () => R.crossSection(vol, arch, S.csIndex, mm(S.panoOffset), mm(S.csWidth), 1),
@@ -293,17 +322,16 @@ function imageToVoxel(kind: ViewKind, u: number, v: number, plane: Plane | null)
     case 'coronal': return [iu, S.cursor[1], z];
     case 'sagittal': return [S.cursor[0], iu, z];
     case 'pano': {
-      if (!S.arch) return null;
-      const a = S.arch;
-      const i = clamp(Math.round(iu), 0, a.M - 1);
-      const off = mm(S.panoOffset);
-      return [a.x[i] + off * a.nx[i], a.y[i] + off * a.ny[i], z, i];
+      const c = panoCurve();
+      if (!c) return null;
+      const j = clamp(Math.round(iu), 0, c.M - 1);
+      return [c.x[j], c.y[j], z, c.at[j]];
     }
     case 'cross': {
       const p = plane as CrossPlane | null;
-      if (!p || !S.arch) return null;
+      if (!p) return null;
       const d = p.half - iu;
-      return [p.cx + d * S.arch.nx[p.index], p.cy + d * S.arch.ny[p.index], z];
+      return [p.cx + d * p.nx, p.cy + d * p.ny, z];
     }
   }
 }
@@ -313,18 +341,17 @@ function setCursor(p: number[]) {
   S.cursor = [clamp(p[0], 0, nx - 1), clamp(p[1], 0, ny - 1), clamp(p[2], 0, nz - 1)];
 }
 
-// The cross-section position is kept in millimetres so stepping by 1 mm never drifts.
+// The cross-section position is kept in millimetres along the arch, so stepping by 1 mm never
+// drifts; it need not fall on an arch sample.
 function setCross(index: number) {
-  if (!S.arch) return;
-  S.csIndex = clamp(Math.round(index), 0, S.arch.M - 1);
-  S.csMm = S.csIndex * volume().sx;
+  setCrossMm(index * volume().sx);
 }
 
 function setCrossMm(value: number) {
   if (!S.arch) return;
   const { sx } = volume();
-  S.csMm = clamp(value, 0, (S.arch.M - 1) * sx);
-  S.csIndex = Math.round(S.csMm / sx);
+  S.csMm = Math.round(clamp(value, 0, (S.arch.M - 1) * sx) * 1e6) / 1e6;
+  S.csIndex = S.csMm / sx;
 }
 
 function navigate(vp: Viewport, u: number, v: number) {
@@ -361,16 +388,16 @@ const hooks: ViewHooks = {
       navigate(vp, pos.u, pos.v);
       return () => { Object.assign(S, before); refresh(); };
     } else if (mode === 'measure' && inside) {
-      S.measuring = { type: 'distance', kind: vp.kind, key: vp.measureKey, a: [pos.u, pos.v], b: [pos.u, pos.v], sx: plane.sx, sy: plane.sy };
+      S.measuring = { type: 'distance', kind: vp.kind, key: vp.measureKey, a: [pos.u, pos.v], b: [pos.u, pos.v], sx: plane.sx, sy: plane.sy, half: crossHalf(vp) };
       return () => { S.measuring = null; requestDraw(vp.kind); };
     } else if (mode === 'angle' && inside) {
       const d = S.angleDraft;
       if (!d || d.kind !== vp.kind || d.key !== vp.measureKey) {
-        S.angleDraft = { type: 'angle', kind: vp.kind, key: vp.measureKey, pts: [[pos.u, pos.v]], sx: plane.sx, sy: plane.sy };
+        S.angleDraft = { type: 'angle', kind: vp.kind, key: vp.measureKey, pts: [[pos.u, pos.v]], sx: plane.sx, sy: plane.sy, half: crossHalf(vp) };
         requestDraw(vp.kind);
         return () => { S.angleDraft = d; requestDraw(); };
       }
-      d.pts.push([pos.u, pos.v]);
+      d.pts.push([pos.u - crossShift(vp, d), pos.v]);
       if (d.pts.length === 3) {
         S.measures.push(d);
         S.angleDraft = null;
@@ -698,9 +725,8 @@ function drawOverlay(vp: Viewport, ctx: Ctx) {
       }
       const cp = views.cross.plane as CrossPlane | null;
       if (cp) {
-        const i = cp.index;
-        const A = P(cp.cx + cp.half * a.nx[i], cp.cy + cp.half * a.ny[i]);
-        const B = P(cp.cx - cp.half * a.nx[i], cp.cy - cp.half * a.ny[i]);
+        const A = P(cp.cx + cp.half * cp.nx, cp.cy + cp.half * cp.ny);
+        const B = P(cp.cx - cp.half * cp.nx, cp.cy - cp.half * cp.ny);
         path(ctx, [A, B], COLORS.cross, 2);
         label(ctx, 'B', A[0], A[1], { color: COLORS.cross, align: 'center', baseline: 'middle', size: 11, weight: 700 });
       }
@@ -748,7 +774,7 @@ function drawOverlay(vp: Viewport, ctx: Ctx) {
         let cur: number[][] = [];
         for (const pr of c.proj) {
           if (!pr) { if (cur.length > 1) segs.push(cur); cur = []; continue; }
-          cur.push(P(pr[0], Z(pr[1])));
+          cur.push(P(panoColumn(pr[0]), Z(pr[1])));
         }
         if (cur.length > 1) segs.push(cur);
         for (const seg of segs) {
@@ -758,15 +784,15 @@ function drawOverlay(vp: Viewport, ctx: Ctx) {
       }
     }
     if (guides) {
-      const [X, Y] = P(S.csIndex, Z(S.cursor[2]));
+      const [X, Y] = P(panoColumn(S.csIndex), Z(S.cursor[2]));
       crosshair(vp, ctx, X, Y, COLORS.cross, COLORS.axial);
     }
     const ticks = vp.report?.ticks ?? [];
     if (ticks.length) {
       const [, top] = vp.toScreen(0, 0);
       const [, bottom] = vp.toScreen(0, vp.plane.h);
-      const [x0] = P(ticks[0].index, 0);
-      const [x1] = P(ticks[ticks.length - 1].index, 0);
+      const [x0] = P(panoColumn(ticks[0].index), 0);
+      const [x1] = P(panoColumn(ticks[ticks.length - 1].index), 0);
       ctx.save();
       ctx.fillStyle = 'rgba(255, 95, 168, 0.14)';
       ctx.fillRect(Math.min(x0, x1) - 2, top, Math.abs(x1 - x0) + 4, bottom - top);
@@ -775,7 +801,7 @@ function drawOverlay(vp: Viewport, ctx: Ctx) {
       const every = Math.max(1, Math.ceil(24 / spacing));
       const dense = ticks.length > 16;
       ticks.forEach((tick, k) => {
-        const [X] = P(tick.index, 0);
+        const [X] = P(panoColumn(tick.index), 0);
         path(ctx, [[X, top], [X, bottom]], COLORS.cross, 1, { dash: dense ? [] : [3, 3], alpha: dense ? 0.5 : 0.75 });
         if (k % every === 0) {
           label(ctx, String(tick.label), X, top + 4, { align: 'center', baseline: 'top', color: '#0b1016', bg: COLORS.cross, size: dense ? 9 : 10, weight: 700 });
@@ -789,12 +815,11 @@ function drawOverlay(vp: Viewport, ctx: Ctx) {
 
   if (kind === 'cross' && a) {
     const cp = vp.plane as CrossPlane;
-    const i = cp.index;
     if (S.showCanals) {
-      const f = (p: Point) => (p[0] - cp.cx) * a.tx[i] + (p[1] - cp.cy) * a.ty[i];
+      const f = (p: Point) => (p[0] - cp.cx) * cp.tx + (p[1] - cp.cy) * cp.ty;
       for (const c of S.canals) {
         for (const q of R.crossings(c.dense, f)) {
-          const d = (q[0] - cp.cx) * a.nx[i] + (q[1] - cp.cy) * a.ny[i];
+          const d = (q[0] - cp.cx) * cp.nx + (q[1] - cp.cy) * cp.ny;
           if (Math.abs(d) > cp.half) continue;
           ring(ctx, P(cp.half - d, Z(q[2])), c.radiusVox * vp.kx, c.css);
         }
@@ -804,7 +829,7 @@ function drawOverlay(vp: Viewport, ctx: Ctx) {
       const [X, Y] = P(cp.half, Z(S.cursor[2]));
       crosshair(vp, ctx, X, Y, COLORS.pano, COLORS.axial);
     }
-    setInfo(t('info.along', { pos: (i * S.vol.sx).toFixed(1), len: (a.length * S.vol.sx).toFixed(1) }));
+    setInfo(t('info.along', { pos: (cp.index * S.vol.sx).toFixed(1), len: (a.length * S.vol.sx).toFixed(1) }));
   }
 
   drawMeasures(vp, ctx);
@@ -823,13 +848,14 @@ function drawMeasures(vp: Viewport, ctx: Ctx) {
   });
   const d = S.angleDraft;
   if (!vp.report && d && d.kind === vp.kind && d.key === vp.measureKey) {
-    const pts = S.angleHover ? [...d.pts, S.angleHover] : d.pts;
+    const pts = S.angleHover ? [...d.pts, [S.angleHover[0] - crossShift(vp, d), S.angleHover[1]]] : d.pts;
     drawAngle(vp, ctx, pts, d, '');
   }
 }
 
 function drawDistance(vp: Viewport, ctx: Ctx, m: Distance, tag: string) {
-  const A = vp.toScreen(m.a[0], m.a[1]), B = vp.toScreen(m.b[0], m.b[1]);
+  const du = crossShift(vp, m);
+  const A = vp.toScreen(m.a[0] + du, m.a[1]), B = vp.toScreen(m.b[0] + du, m.b[1]);
   path(ctx, [A, B], COLORS.measure, 2);
   dot(ctx, A, COLORS.measure);
   dot(ctx, B, COLORS.measure);
@@ -838,7 +864,8 @@ function drawDistance(vp: Viewport, ctx: Ctx, m: Distance, tag: string) {
 }
 
 function drawAngle(vp: Viewport, ctx: Ctx, pts: number[][], m: Angle, tag: string) {
-  const P = pts.map((p) => vp.toScreen(p[0], p[1]));
+  const du = crossShift(vp, m);
+  const P = pts.map((p) => vp.toScreen(p[0] + du, p[1]));
   path(ctx, P, COLORS.measure, 2);
   P.forEach((p) => dot(ctx, p, COLORS.measure));
   if (pts.length < 3) return;
@@ -1042,7 +1069,7 @@ async function createPdfReport() {
       const items: CrossItem[] = [];
       for (let k = 0; first + k * step <= lengthMm - 2 + 1e-6 && items.length < 400; k++) {
         const pos = first + k * step;
-        items.push({ index: Math.round(pos / sx), label: k + 1, detail: `${fmt(pos)} mm` });
+        items.push({ index: pos / sx, label: k + 1, detail: `${fmt(pos)} mm` });
       }
       if (items.length) {
         const plane = (it: CrossItem) => R.crossSection(vol, a, it.index, mm(S.panoOffset), mm(S.csWidth), 1);
@@ -1540,6 +1567,7 @@ function closeScan() {
     vol: null, meta: null, lut: null, series: [], arches: [], arch: null, archIdx: -1, canals: [],
     measures: [], measuring: null, drawing: null, angleDraft: null, start: null,
   });
+  curveMemo = null;
   fillSeries();
   fillArchSelect();
   KINDS_2D.forEach((k) => {

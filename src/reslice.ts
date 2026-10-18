@@ -22,12 +22,28 @@ export interface Plane {
   data: Uint16Array;
 }
 
-// A cross-section also knows where it sits on the arch.
+// A cross-section also knows where it sits on the arch: at arch sample `index` (fractional),
+// centred on (cx, cy), with the arch's unit tangent and buccal normal there.
 export interface CrossPlane extends Plane {
   half: number;
   cx: number;
   cy: number;
   index: number;
+  tx: number;
+  ty: number;
+  nx: number;
+  ny: number;
+}
+
+// The panoramic's curve: the arch moved along its normals and resampled at 1-voxel steps.
+// Column j sits over arch sample at[j] (fractional).
+export interface PanoCurve {
+  M: number;
+  x: Float32Array;
+  y: Float32Array;
+  nx: Float32Array;
+  ny: Float32Array;
+  at: Float32Array;
 }
 
 // An arch resampled at 1-voxel steps: positions, unit tangents and buccal normals.
@@ -204,33 +220,84 @@ export function nearestOnArch(arch: Arch, px: number, py: number) {
   return { index: best, dist: Math.sqrt(bestD) };
 }
 
-export function panoramic(vol: Volume, arch: Arch, offsetVox: number, thickVox: number, mode: PanoMode): Plane {
-  const { M } = arch;
-  const xs = new Float32Array(M), ys = new Float32Array(M);
-  for (let i = 0; i < M; i++) {
-    xs[i] = arch.x[i] + offsetVox * arch.nx[i];
-    ys[i] = arch.y[i] + offsetVox * arch.ny[i];
-  }
-  return { w: M, h: vol.nz, sx: vol.sx, sy: vol.sz, data: columns(vol, xs, ys, arch.nx, arch.ny, thickVox, mode) };
+// Position, unit tangent and buccal normal at fractional arch sample s.
+export function archAt(arch: Arch, s: number) {
+  const i = Math.max(0, Math.min(arch.M - 1, s));
+  const i0 = Math.min(Math.floor(i), arch.M - 2), f = i - i0;
+  const lerp = (v: Float32Array) => v[i0] + (v[i0 + 1] - v[i0]) * f;
+  const tx = lerp(arch.tx), ty = lerp(arch.ty), nx = lerp(arch.nx), ny = lerp(arch.ny);
+  const t = Math.hypot(tx, ty) || 1, n = Math.hypot(nx, ny) || 1;
+  return { x: lerp(arch.x), y: lerp(arch.y), tx: tx / t, ty: ty / t, nx: nx / n, ny: ny / n };
 }
 
-// Plane perpendicular to the arch at sample `index`; column 0 is buccal.
+// Moved buccally the arch gets longer and moved lingually shorter, so the moved curve is
+// resampled: its columns stay 1 voxel apart and the panoramic keeps its scale in mm.
+export function panoCurve(arch: Arch, offsetVox: number): PanoCurve {
+  const { M } = arch;
+  if (!offsetVox) return { M, x: arch.x, y: arch.y, nx: arch.nx, ny: arch.ny, at: Float32Array.from({ length: M }, (_, i) => i) };
+  const ox = new Float64Array(M), oy = new Float64Array(M), cum = new Float64Array(M);
+  for (let i = 0; i < M; i++) {
+    ox[i] = arch.x[i] + offsetVox * arch.nx[i];
+    oy[i] = arch.y[i] + offsetVox * arch.ny[i];
+    if (i) cum[i] = cum[i - 1] + Math.hypot(ox[i] - ox[i - 1], oy[i] - oy[i - 1]);
+  }
+  const total = cum[M - 1];
+  const N = Math.max(2, Math.floor(total) + 1);
+  const x = new Float32Array(N), y = new Float32Array(N), nx = new Float32Array(N), ny = new Float32Array(N);
+  const at = new Float32Array(N);
+  let i = 0;
+  for (let j = 0; j < N; j++) {
+    const s = Math.min(j, total);
+    while (i < M - 2 && cum[i + 1] < s) i++;
+    const seg = cum[i + 1] - cum[i];
+    const f = seg > 0 ? Math.min(1, (s - cum[i]) / seg) : 0;
+    at[j] = i + f;
+    x[j] = ox[i] + (ox[i + 1] - ox[i]) * f;
+    y[j] = oy[i] + (oy[i + 1] - oy[i]) * f;
+    const p = archAt(arch, at[j]);
+    nx[j] = p.nx;
+    ny[j] = p.ny;
+  }
+  return { M: N, x, y, nx, ny, at };
+}
+
+// The (fractional) panoramic column over arch sample s.
+export function panoColumn(curve: PanoCurve, s: number) {
+  const { at, M } = curve;
+  if (s <= at[0]) return 0;
+  if (s >= at[M - 1]) return M - 1;
+  let lo = 0, hi = M - 1;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (at[mid] <= s) lo = mid; else hi = mid;
+  }
+  const span = at[hi] - at[lo];
+  return lo + (span > 0 ? (s - at[lo]) / span : 0);
+}
+
+export function panoramic(vol: Volume, curve: PanoCurve, thickVox: number, mode: PanoMode): Plane {
+  return { w: curve.M, h: vol.nz, sx: vol.sx, sy: vol.sz, data: columns(vol, curve.x, curve.y, curve.nx, curve.ny, thickVox, mode) };
+}
+
+// Plane perpendicular to the arch at sample `index`, which may fall between samples so that
+// sections can be exactly 1 mm apart; column 0 is buccal.
 export function crossSection(vol: Volume, arch: Arch, index: number, offsetVox: number, widthVox: number, thickVox: number): CrossPlane {
   const W = Math.max(8, Math.round(widthVox) | 1);
   const half = (W - 1) / 2;
-  const i = Math.max(0, Math.min(arch.M - 1, index));
-  const cx = arch.x[i] + offsetVox * arch.nx[i];
-  const cy = arch.y[i] + offsetVox * arch.ny[i];
+  const s = Math.max(0, Math.min(arch.M - 1, index));
+  const { x, y, tx, ty, nx, ny } = archAt(arch, s);
+  const cx = x + offsetVox * nx;
+  const cy = y + offsetVox * ny;
   const xs = new Float32Array(W), ys = new Float32Array(W);
-  const dx = new Float32Array(W).fill(arch.tx[i]);
-  const dy = new Float32Array(W).fill(arch.ty[i]);
+  const dx = new Float32Array(W).fill(tx);
+  const dy = new Float32Array(W).fill(ty);
   for (let j = 0; j < W; j++) {
     const d = half - j;
-    xs[j] = cx + d * arch.nx[i];
-    ys[j] = cy + d * arch.ny[i];
+    xs[j] = cx + d * nx;
+    ys[j] = cy + d * ny;
   }
   return {
-    w: W, h: vol.nz, sx: vol.sx, sy: vol.sz, half, cx, cy, index: i,
+    w: W, h: vol.nz, sx: vol.sx, sy: vol.sz, half, cx, cy, index: s, tx, ty, nx, ny,
     data: columns(vol, xs, ys, dx, dy, thickVox, 'avg'),
   };
 }
