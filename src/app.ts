@@ -1185,7 +1185,10 @@ const TOOL_MESSAGES = ['msg.arch.draw', 'msg.arch.tap', 'msg.angle', 'msg.angle.
 
 function setTool(tool: string) {
   S.tool = tool;
-  document.querySelectorAll<HTMLElement>('button[data-tool]').forEach((b) => b.classList.toggle('active', b.dataset.tool === tool));
+  document.querySelectorAll<HTMLElement>('button[data-tool]').forEach((b) => {
+    b.classList.toggle('active', b.dataset.tool === tool);
+    b.setAttribute('aria-pressed', String(b.dataset.tool === tool));
+  });
   document.body.dataset.tool = tool;
   if (tool !== 'arch' && S.drawing) {
     S.drawing = null;
@@ -1319,7 +1322,7 @@ function bindUi() {
 
   $('#invert').addEventListener('click', () => {
     S.invert = !S.invert;
-    $('#invert').classList.toggle('active', S.invert);
+    syncControls();
     buildLut();
   });
   const canals = $<HTMLInputElement>('#showCanals');
@@ -1366,7 +1369,16 @@ function bindUi() {
   $('#welcomePrivacy').addEventListener('click', () => openCenter('privacy'));
   const center = $('#center');
   center.addEventListener('click', (e) => { if (e.target === center || target(e)?.closest('.center-close')) closeCenter(); });
-  center.querySelectorAll<HTMLElement>('[data-tab]').forEach((b) => b.addEventListener('click', () => openCenter(b.dataset.tab)));
+  const tabs = [...center.querySelectorAll<HTMLElement>('[data-tab]')];
+  tabs.forEach((b) => b.addEventListener('click', () => openCenter(b.dataset.tab)));
+  // Arrow keys move between the tabs, as in any tab list.
+  find(center, '[role="tablist"]').addEventListener('keydown', (e) => {
+    const at = tabs.findIndex((b) => b.classList.contains('active'));
+    const next: Record<string, number> = { ArrowRight: at + 1, ArrowLeft: at - 1, Home: 0, End: tabs.length - 1 };
+    if (!(e.key in next) || at < 0) return;
+    e.preventDefault();
+    openCenter(tabs[(next[e.key] + tabs.length) % tabs.length].dataset.tab);
+  });
   $('#closeScanBtn').addEventListener('click', closeScan);
   window.addEventListener('hashchange', routeHash);
   $<HTMLAnchorElement>('#aboutSource').href = REPO_URL;
@@ -1492,6 +1504,13 @@ function bindUi() {
 
 const TABS = ['guide', 'privacy', 'about', 'terms'];
 const privacy: { blocked: number; timer?: ReturnType<typeof setInterval> } = { blocked: 0 };
+// Where the keyboard focus was before the help centre opened, to give it back on close.
+let focusBeforeCenter: HTMLElement | null = null;
+
+// While the help centre is open, the page behind it can be neither clicked nor tabbed to.
+function setPageInert(on: boolean) {
+  for (const el of document.body.children) if (el instanceof HTMLElement && el.id !== 'center') el.inert = on;
+}
 
 function setHash(tab: string) {
   try {
@@ -1506,11 +1525,17 @@ function setHash(tab: string) {
 function openCenter(tab = 'guide') {
   if (!TABS.includes(tab)) tab = 'guide';
   const center = $('#center');
+  if (center.hidden) {
+    focusBeforeCenter = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setPageInert(true);
+  }
   center.hidden = false;
   center.querySelectorAll<HTMLElement>('[data-tab]').forEach((b) => {
     const on = b.dataset.tab === tab;
     b.classList.toggle('active', on);
     b.setAttribute('aria-selected', String(on));
+    b.tabIndex = on ? 0 : -1;
+    if (on) b.focus();
   });
   center.querySelectorAll<HTMLElement>('[data-panel]').forEach((panel) => { panel.hidden = panel.dataset.panel !== tab; });
   find(center, '.center-body').scrollTop = 0;
@@ -1524,6 +1549,9 @@ function openCenter(tab = 'guide') {
 
 function closeCenter() {
   $('#center').hidden = true;
+  setPageInert(false);
+  focusBeforeCenter?.focus();
+  focusBeforeCenter = null;
   clearInterval(privacy.timer);
   setHash('');
 }
@@ -1810,6 +1838,7 @@ function syncControls() {
   $<HTMLSelectElement>('#csStep').value = String(S.csStep);
   $<HTMLSelectElement>('#csWidth').value = String(S.csWidth);
   $('#invert').classList.toggle('active', S.invert);
+  $('#invert').setAttribute('aria-pressed', String(S.invert));
   $<HTMLInputElement>('#showCanals').checked = S.showCanals;
   $<HTMLInputElement>('#showGuides').checked = S.showGuides;
 }

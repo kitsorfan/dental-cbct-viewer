@@ -195,7 +195,7 @@
 
   <footer class="status">
     <span id="statusHover"></span>
-    <span id="statusMsg"></span>
+    <span id="statusMsg" role="status" aria-live="polite"></span>
     <button id="privacyBadge" class="badge" data-i18n-title="tab.privacy"><svg><use href="#i-shield"/></svg><span data-i18n="privacy.badge"></span></button>
     <span id="statusWL"></span>
   </footer>
@@ -216,7 +216,7 @@
       </div>
       <p class="hint" data-i18n="welcome.hint"></p>
       <button id="welcomePrivacy" class="link with-icon"><svg><use href="#i-shield"/></svg><span data-i18n="welcome.privacy"></span></button>
-      <p class="error" id="welcomeError" hidden></p>
+      <p class="error" id="welcomeError" role="alert" hidden></p>
     </div>
   </div>
 
