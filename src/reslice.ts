@@ -302,6 +302,32 @@ export function crossSection(vol: Volume, arch: Arch, index: number, offsetVox: 
   };
 }
 
+// Where (image v) to centre a band `rows` high to show most of a plane's brightest pixels: on a
+// panoramic, the teeth, which show best where along the arch a section lies. The band holding
+// the most of them is found first, then centred on them, as many bands can hold them all.
+export function brightestBand(plane: Plane, rows: number) {
+  const { w, h, data } = plane;
+  const sample: number[] = [];
+  for (let i = 0; i < data.length; i += 7) sample.push(data[i]);
+  sample.sort((a, b) => a - b);
+  const threshold = sample[Math.floor(sample.length * 0.98)];
+  if (threshold <= sample[0]) return h / 2; // nothing stands out
+  const count = new Float64Array(h);
+  for (let y = 0, p = 0; y < h; y++) for (let x = 0; x < w; x++, p++) if (data[p] >= threshold) count[y]++;
+  const span = Math.max(1, Math.min(h, Math.round(rows)));
+  let sum = 0;
+  for (let y = 0; y < span; y++) sum += count[y];
+  let best = sum, start = 0;
+  for (let y = span; y < h; y++) {
+    sum += count[y] - count[y - span];
+    if (sum > best) { best = sum; start = y - span + 1; }
+  }
+  if (!best) return h / 2;
+  let rowSum = 0;
+  for (let y = start; y < start + span; y++) rowSum += y * count[y];
+  return rowSum / best + 0.5;
+}
+
 // Where a 3D polyline crosses the plane f(p) = 0; returns interpolated points.
 export function crossings(poly: Point[], f: (p: Point) => number): Point[] {
   const hits: Point[] = [];

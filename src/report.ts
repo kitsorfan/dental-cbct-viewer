@@ -36,11 +36,13 @@ export interface ReportInput {
   pageLabel: (n: number, total: number) => string;
   titles: { overview: string };
   info: [string, string][];
+  // strip: fill the width and crop to the height around the arch, for the sections' locator.
   pano: {
     title: string;
     subtitle: string;
     aspect: number;
-    render: (w: number, h: number, extra?: { ticks?: CrossItem[]; compact?: boolean }) => Image;
+    width: number; // mm along the arch
+    render: (w: number, h: number, extra?: { ticks?: CrossItem[]; compact?: boolean; strip?: boolean }) => Image;
   } | null;
   overviewTiles: Tile[];
   cross: {
@@ -260,21 +262,27 @@ export async function createReport(r: ReportInput) {
   }
 
   // Serial cross-sections at a fixed interval along the whole arch, as many pages as needed.
-  // Each page starts with a small panoramic marking the sections it holds.
+  // Each page starts with the panoramic marking the sections it holds: across the full width
+  // (at most twice life size) and cropped to the height around the arch, so that sections 1 mm
+  // apart are marks far enough apart to number. It takes the height the rows leave spare.
   if (r.cross && r.pano) { // serial sections are only made along a panoramic
     const cross = r.cross;
     const items = cross.items;
     const cols = 6, gap = 3, label = 4.6;
     const cw = (CONTENT_W - (cols - 1) * gap) / cols;
     const ch = cw / r.cross.aspect;
-    const stripH = Math.min(30, CONTENT_W / r.pano.aspect);
-    const stripW = stripH * r.pano.aspect;
+    const scale = Math.min(CONTENT_W / r.pano.width, 2);
+    const stripW = r.pano.width * scale;
+    const panoH = (r.pano.width / r.pano.aspect) * scale;
     let start = 0;
     while (start < items.length) {
       const { canvas, ctx } = newPage();
       let y = header(ctx, r, r.cross.title);
+      const least = Math.min(30, panoH);
+      const room = FOOTER_Y - 3 - (y + 6 + least + 5) + gap;
+      const rows = Math.max(1, Math.floor(room / (ch + label + gap)));
+      const stripH = Math.min(panoH, 46, least + Math.max(0, room - rows * (ch + label + gap)));
       const top = y + 6 + stripH + 5;
-      const rows = Math.max(1, Math.floor((FOOTER_Y - 3 - top + gap) / (ch + label + gap)));
       const pageItems = items.slice(start, start + rows * cols);
       ctx.font = font(8);
       ctx.fillStyle = MUTED;
@@ -284,7 +292,7 @@ export async function createReport(r: ReportInput) {
       ctx.fillStyle = INK;
       ctx.fillText(r.cross.range(start + 1, start + pageItems.length, items.length), PAGE[0] - M, y + 2.5);
       ctx.textAlign = 'left';
-      const strip = r.pano.render(stripW, stripH, { ticks: pageItems, compact: true });
+      const strip = r.pano.render(stripW, stripH, { ticks: pageItems, compact: true, strip: true });
       imageBox(ctx, strip, M + (CONTENT_W - stripW) / 2, y + 5, stripW, stripH);
       pageItems.forEach((item, i) => {
         const x = M + (i % cols) * (cw + gap);

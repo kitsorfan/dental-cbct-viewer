@@ -820,24 +820,44 @@ function drawOverlay(vp: Viewport, ctx: Ctx) {
     }
     const ticks = vp.report?.ticks ?? [];
     if (ticks.length) {
-      const [, top] = vp.toScreen(0, 0);
-      const [, bottom] = vp.toScreen(0, vp.plane.h);
-      const [x0] = P(panoColumn(ticks[0].index), 0);
-      const [x1] = P(panoColumn(ticks[ticks.length - 1].index), 0);
+      // A strip is cropped, so the marks and their numbers keep within the canvas.
+      const top = Math.max(0, vp.toScreen(0, 0)[1]);
+      const bottom = Math.min(vp.cssH, vp.toScreen(0, vp.plane.h)[1]);
+      const marks = ticks.map((tick) => ({ tick, X: P(panoColumn(tick.index), 0)[0] }));
+      const first = marks[0], last = marks[marks.length - 1];
       ctx.save();
       ctx.fillStyle = 'rgba(255, 95, 168, 0.14)';
-      ctx.fillRect(Math.min(x0, x1) - 2, top, Math.abs(x1 - x0) + 4, bottom - top);
+      ctx.fillRect(Math.min(first.X, last.X) - 2, top, Math.abs(last.X - first.X) + 4, bottom - top);
+      // Numbered: the page's first and last section, and every 1, 2, 5, 10… in between, as
+      // often as the numbers fit side by side.
+      const dense = ticks.length > 16, size = dense ? 9 : 10;
+      ctx.font = `700 ${size}px ui-sans-serif, system-ui, "Segoe UI", sans-serif`;
+      const half = (m: typeof first) => ctx.measureText(String(m.tick.label)).width / 2 + 5; // with the badge's padding
+      const need = 2 * half(last) + 2;
+      const spacing = marks.length > 1 ? Math.abs(last.X - first.X) / (marks.length - 1) : Infinity;
+      const step = [1, 2, 5, 10, 20, 50, 100].find((s) => s * spacing >= need) ?? 100;
+      const numbered = last === first ? [first] : [first, last];
+      for (const m of marks) {
+        if (m.tick.label % step === 0 && numbered.every((n) => Math.abs(n.X - m.X) >= need)) numbered.push(m);
+      }
+      // Badges sit over their marks; the first and last move apart when too close to share
+      // the space, and every badge stays inside the image.
+      const at = new Map(numbered.map((m) => [m, m.X]));
+      const gap = Math.abs(last.X - first.X), dir = Math.sign(last.X - first.X) || 1;
+      if (last !== first && gap < half(first) + half(last) + 2) {
+        const mid = (first.X + last.X) / 2;
+        at.set(first, mid - dir * (half(first) + 1));
+        at.set(last, mid + dir * (half(last) + 1));
+      }
+      for (const m of numbered) at.set(m, clamp(at.get(m) ?? m.X, half(m) + 2, vp.cssW - half(m) - 2));
       ctx.restore();
-      const spacing = ticks.length > 1 ? Math.abs(x1 - x0) / (ticks.length - 1) : 99;
-      const every = Math.max(1, Math.ceil(24 / spacing));
-      const dense = ticks.length > 16;
-      ticks.forEach((tick, k) => {
-        const [X] = P(panoColumn(tick.index), 0);
-        path(ctx, [[X, top], [X, bottom]], COLORS.cross, 1, { dash: dense ? [] : [3, 3], alpha: dense ? 0.5 : 0.75 });
-        if (k % every === 0) {
-          label(ctx, String(tick.label), X, top + 4, { align: 'center', baseline: 'top', color: '#0b1016', bg: COLORS.cross, size: dense ? 9 : 10, weight: 700 });
-        }
-      });
+      for (const m of marks) {
+        const on = numbered.includes(m);
+        path(ctx, [[m.X, top], [m.X, bottom]], COLORS.cross, 1, { dash: on || dense ? [] : [3, 3], alpha: on ? 0.9 : 0.45 });
+      }
+      for (const m of numbered) {
+        label(ctx, String(m.tick.label), at.get(m) ?? m.X, top + 4, { align: 'center', baseline: 'top', color: '#0b1016', bg: COLORS.cross, size, weight: 700 });
+      }
     }
     const name = S.arches[S.archIdx] ? archName(S.arches[S.archIdx]) : '';
     const off = S.panoOffset ? `  ·  ${t('info.offset', { v: `${S.panoOffset > 0 ? '+' : ''}${S.panoOffset.toFixed(1)}` })}` : '';
@@ -1027,6 +1047,15 @@ function renderPlane(kind: ViewKind, plane: Plane, wMm: number, hMm: number, ext
   const vp = new Viewport(null, kind, { ...hooks, invalidate() {} },
     { width: wMm * CSS_PER_MM, height: hMm * CSS_PER_MM, pixelRatio: PIXEL_RATIO });
   vp.setPlane(plane);
+  if (extra.strip) {
+    // The full width, and of the height the band around the teeth, as far as the image reaches.
+    const cssPerMm = vp.cssW / (plane.w * plane.sx);
+    vp.layout();
+    vp.zoomTo(vp.zoom * cssPerMm / vp.cssPerMm, [plane.w / 2, R.brightestBand(plane, vp.cssH / (cssPerMm * plane.sy))], vp.cssW / 2, vp.cssH / 2);
+    vp.layout();
+    const height = plane.h * vp.ky;
+    if (height >= vp.cssH) vp.panY += clamp(vp.oy, vp.cssH - height, 0) - vp.oy;
+  }
   vp.report = extra;
   vp.measureKey = extra.measureKey ?? null;
   vp.slice = extra.slice;
@@ -1073,6 +1102,7 @@ async function createPdfReport() {
       title: t('view.pano'),
       subtitle: [S.arches[S.archIdx] && archName(S.arches[S.archIdx]), `${S.panoThick} mm`].filter(Boolean).join(' · '),
       aspect: physical(panoPlane),
+      width: panoPlane.w * panoPlane.sx,
       render: (w, h, extra = {}) => renderPlane('pano', panoPlane, w, h, { ...extra, measureKey: extra.ticks ? null : views.pano.measureKey }),
     };
 

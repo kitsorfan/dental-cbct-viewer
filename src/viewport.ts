@@ -31,10 +31,12 @@ export interface Pos {
   v: number;
 }
 
-// Options for off-screen renders: numbered ticks on the panoramic, smaller labels.
+// Options for off-screen renders: numbered ticks on the panoramic, smaller labels, and strip:
+// fill the width and crop to the height around the arch.
 export interface RenderExtras {
   ticks?: CrossItem[];
   compact?: boolean;
+  strip?: boolean;
   measureKey?: string | null;
   slice?: number[];
 }

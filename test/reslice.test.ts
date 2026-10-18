@@ -81,6 +81,19 @@ test('cross-sections can sit between arch samples', () => {
   assert.ok(Math.abs(cs.nx * cs.tx + cs.ny * cs.ty) < 1e-3, 'normal is perpendicular to the tangent');
 });
 
+test('finds the band of a panoramic that holds the teeth', () => {
+  // 100 rows of dim bone, with bright "teeth" in rows 30–39 and a single bright speck lower down.
+  const w = 50, h = 100;
+  const data = new Uint16Array(w * h).fill(1000);
+  for (let y = 30; y < 40; y++) data.fill(3000, y * w, y * w + 40);
+  data[80 * w + 5] = 3000;
+  const plane = { w, h, sx: 1, sy: 1, data };
+  // Any band 40 rows high holds all the teeth; the teeth end up in its middle, not at an edge.
+  assert.ok(Math.abs(R.brightestBand(plane, 40) - 35) < 1);
+  assert.ok(Math.abs(R.brightestBand(plane, 6) - 35) < 4, 'a narrow band stays on the teeth');
+  assert.equal(R.brightestBand({ w, h, sx: 1, sy: 1, data: new Uint16Array(w * h) }, 20), 50, 'a blank plane is centred');
+});
+
 test('columns averages across the slab', () => {
   const vol = rampVolume(10, 10, 1);
   const out = R.columns(vol, new Float32Array([4]), new Float32Array([4]), new Float32Array([1]), new Float32Array([0]), 3, 'avg');
