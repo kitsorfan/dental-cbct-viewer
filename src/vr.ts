@@ -2,9 +2,12 @@
 // World axes match voxel axes: +x patient left, +y posterior, +z superior.
 
 import { Touches } from './touch.ts';
+import { onPixelRatioChange } from './viewport.ts';
 import type { Volume } from './reslice.ts';
 
 const MIN_DIST = 0.8, MAX_DIST = 6;
+// Voxels per axis sent to the GPU, at most; lower if the GPU allows less (WebGL2 promises 256).
+const TEXTURE_SIDE = 300;
 const clampDist = (d: number) => Math.min(MAX_DIST, Math.max(MIN_DIST, d));
 
 const VS = `#version 300 es
@@ -175,6 +178,8 @@ export class VolumeView {
   vao!: WebGLVertexArrayObject;
   u = {} as Record<Uniform, WebGLUniformLocation | null>;
   texture: WebGLTexture | null = null;
+  // What setVolume() was given, to upload again if the GPU context is lost and restored.
+  source: { vol: Volume; lo: number; hi: number } | null = null;
   half!: number[];
   texel!: number[];
   stepWorld!: number;
@@ -200,7 +205,27 @@ export class VolumeView {
       this.failed = 'webgl';
       return;
     }
+    // A GPU reset, or a phone reclaiming memory from a background tab, loses the context and
+    // everything on the GPU; once it is back, the program and the volume are set up again.
+    canvas.addEventListener('webglcontextlost', (e) => {
+      e.preventDefault();
+      this.ready = false;
+      this.texture = null;
+      cancelAnimationFrame(this.pending);
+    });
+    canvas.addEventListener('webglcontextrestored', () => {
+      const gl = this.gl;
+      if (!gl) return;
+      try {
+        this.init(gl);
+      } catch (err) {
+        console.error(err);
+        return;
+      }
+      if (this.source) this.setVolume(this.source.vol, this.source.lo, this.source.hi);
+    });
     new ResizeObserver(() => this.resize()).observe(wrap);
+    onPixelRatioChange(() => this.resize());
     this.bind();
   }
 
@@ -233,8 +258,11 @@ export class VolumeView {
   setVolume(vol: Volume, lo: number, hi: number) {
     const gl = this.gl;
     if (!gl) return;
+    this.source = { vol, lo, hi };
+    if (gl.isContextLost()) return;
     const { nx, ny, nz, data } = vol;
-    const f = Math.max(1, Math.ceil(Math.max(nx, ny, nz) / 300));
+    const side = Math.min(TEXTURE_SIDE, gl.getParameter(gl.MAX_3D_TEXTURE_SIZE) || 256);
+    const f = Math.max(1, Math.ceil(Math.max(nx, ny, nz) / side));
     const dx = Math.floor(nx / f), dy = Math.floor(ny / f), dz = Math.floor(nz / f);
     const out = new Uint8Array(dx * dy * dz);
     const scale = 255 / (hi - lo);
@@ -282,6 +310,7 @@ export class VolumeView {
     if (!gl) return;
     if (this.texture) gl.deleteTexture(this.texture);
     this.texture = null;
+    this.source = null;
     this.ready = false;
     gl.clearColor(0, 0, 0, 0);
     gl.clear(gl.COLOR_BUFFER_BIT);
@@ -289,7 +318,7 @@ export class VolumeView {
 
   // Render at an exact pixel size into a new 2D canvas (for exports), then restore.
   snapshot(width: number, height: number) {
-    if (!this.ready) return null;
+    if (!this.ready || this.gl?.isContextLost()) return null;
     const c = this.canvas;
     const [w0, h0] = [c.width, c.height];
     c.width = Math.round(width);
@@ -325,7 +354,7 @@ export class VolumeView {
 
   draw(fast: boolean) {
     const gl = this.gl;
-    if (!gl) return;
+    if (!gl || !this.ready || gl.isContextLost()) return;
     const w = this.canvas.width, h = this.canvas.height;
     gl.viewport(0, 0, w, h);
     gl.useProgram(this.prog);

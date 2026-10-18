@@ -14,6 +14,15 @@ const VIEW_MODES = new Set(['pan', 'zoom', 'wl', 'scroll']);
 
 export type ViewKind = 'pano' | 'axial' | 'cross' | 'coronal' | 'sagittal';
 
+// Calls fn whenever the screen's pixel ratio changes, e.g. when the window moves to a monitor
+// with other scaling: no element changes size then, so no ResizeObserver fires.
+export function onPixelRatioChange(fn: () => void) {
+  const watch = () => {
+    matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`).addEventListener('change', () => { fn(); watch(); }, { once: true });
+  };
+  watch();
+}
+
 // A pointer position on screen (X, Y in CSS pixels) and in the image (u, v).
 export interface Pos {
   X: number;
@@ -57,6 +66,8 @@ export class Viewport {
   kind: ViewKind;
   hooks: ViewHooks;
   ratio: number | null;
+  // The pixel ratio the canvas was sized for; drawing uses it until the next resize.
+  dpr = 1;
   wrap: HTMLElement | null;
   canvas: HTMLCanvasElement;
   ctx: CanvasRenderingContext2D;
@@ -106,11 +117,13 @@ export class Viewport {
     if (offscreen) {
       this.cssW = offscreen.width;
       this.cssH = offscreen.height;
+      this.dpr = offscreen.pixelRatio;
       this.canvas.width = Math.round(this.cssW * offscreen.pixelRatio);
       this.canvas.height = Math.round(this.cssH * offscreen.pixelRatio);
       return;
     }
     if (this.wrap) new ResizeObserver(() => this.resize()).observe(this.wrap);
+    onPixelRatioChange(() => this.resize());
     this.bind();
   }
 
@@ -121,11 +134,11 @@ export class Viewport {
   resize() {
     if (!this.wrap) return;
     const r = this.wrap.getBoundingClientRect();
-    const dpr = this.pixelRatio();
+    this.dpr = this.pixelRatio();
     this.cssW = Math.max(1, r.width);
     this.cssH = Math.max(1, r.height);
-    this.canvas.width = Math.round(this.cssW * dpr);
-    this.canvas.height = Math.round(this.cssH * dpr);
+    this.canvas.width = Math.round(this.cssW * this.dpr);
+    this.canvas.height = Math.round(this.cssH * this.dpr);
     this.hooks.invalidate(this);
   }
 
@@ -184,8 +197,7 @@ export class Viewport {
 
   draw(lut: Uint32Array | null) {
     const ctx = this.ctx;
-    const dpr = this.pixelRatio();
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, this.cssW, this.cssH);
     const plane = this.plane;
