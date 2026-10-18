@@ -1,13 +1,19 @@
 // Builds small DICOM files in memory so tests never need real patient scans.
 
+import zlib from 'node:zlib';
+
 const LONG_VRS = new Set(['OB', 'OD', 'OF', 'OL', 'OV', 'OW', 'SQ', 'SV', 'UC', 'UN', 'UR', 'UT', 'UV']);
 const UNDEF = 0xffffffff;
+const DEFLATED = '1.2.840.10008.1.2.1.99';
 const utf8 = new TextEncoder();
 
 // One element: [tag, VR, value, options]. A value is text, a US number, a typed array, or for SQ
-// a list of items, each an element list. { undefinedLength: true } marks encapsulated data.
-export type DicomElement = [tag: number, vr: string, value: Value, opts?: { undefinedLength?: boolean }];
+// (and UN, whose items are then implicit VR) a list of items, each an element list.
+// { undefinedLength: true } marks dummy encapsulated data; { fragments, offsets } real encapsulated
+// data with a basic offset table.
+export type DicomElement = [tag: number, vr: string, value: Value, opts?: ElementOptions];
 type Value = string | number | ArrayBufferView | DicomElement[][];
+interface ElementOptions { undefinedLength?: boolean; fragments?: Uint8Array[]; offsets?: number[] }
 
 export interface WriteOptions { transfer?: string; preamble?: boolean }
 export interface SliceOptions {
@@ -16,7 +22,7 @@ export interface SliceOptions {
   z?: number;
   instance?: number;
   series?: string;
-  pixels?: Uint16Array | Int16Array;
+  pixels?: Uint16Array | Int16Array | Uint8Array;
   signed?: boolean;
   extra?: DicomElement[];
 }
@@ -48,9 +54,15 @@ function encode(elements: DicomElement[], explicit: boolean): Uint8Array {
     const asExplicit = explicit || group === 0x0002;
     let body: Uint8Array;
     let length: number;
-    if (vr === 'SQ') {
-      const items = (value as DicomElement[][]).map((item) => concat([tagBytes(0xfffee000), u32(UNDEF), encode(item, explicit), tagBytes(0xfffee00d), u32(0)]));
+    if (vr === 'SQ' || (vr === 'UN' && Array.isArray(value))) {
+      const inner = explicit && vr === 'SQ';
+      const items = (value as DicomElement[][]).map((item) => concat([tagBytes(0xfffee000), u32(UNDEF), encode(item, inner), tagBytes(0xfffee00d), u32(0)]));
       body = concat([...items, tagBytes(0xfffee0dd), u32(0)]);
+      length = UNDEF;
+    } else if (opts.fragments) {
+      const table = concat((opts.offsets ?? []).map(u32));
+      const items = opts.fragments.map((f) => concat([tagBytes(0xfffee000), u32(f.length), f]));
+      body = concat([tagBytes(0xfffee000), u32(table.length), table, ...items, tagBytes(0xfffee0dd), u32(0)]);
       length = UNDEF;
     } else if (opts.undefinedLength) {
       body = concat([tagBytes(0xfffee000), u32(0), tagBytes(0xfffee000), u32(4), new Uint8Array(4), tagBytes(0xfffee0dd), u32(0)]);
@@ -73,7 +85,8 @@ function encode(elements: DicomElement[], explicit: boolean): Uint8Array {
 export function writeDicom(elements: DicomElement[], { transfer = '1.2.840.10008.1.2.1', preamble = true }: WriteOptions = {}) {
   const explicit = transfer !== '1.2.840.10008.1.2';
   const meta = encode([[0x00020010, 'UI', transfer]], true);
-  const dataset = encode(elements.slice().sort((a, b) => (a[0] >>> 0) - (b[0] >>> 0)), explicit);
+  let dataset = encode(elements.slice().sort((a, b) => (a[0] >>> 0) - (b[0] >>> 0)), explicit);
+  if (transfer === DEFLATED) dataset = new Uint8Array(zlib.deflateRawSync(dataset));
   const head = preamble ? concat([new Uint8Array(128), utf8.encode('DICM')]) : new Uint8Array(0);
   return concat([head, meta, dataset]);
 }

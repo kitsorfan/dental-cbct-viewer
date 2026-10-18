@@ -1801,7 +1801,8 @@ function setVolume(meta: ScanMeta, data: Uint16Array) {
 function restoreOpeningState() {
   const start = S.start;
   if (!S.vol || !start) return;
-  Object.assign(S, { ...DEFAULTS, invert: false, showCanals: true, showGuides: true });
+  // MONOCHROME1 scans are meant to be shown with the lowest values white.
+  Object.assign(S, { ...DEFAULTS, invert: !!S.meta?.inverted, showCanals: true, showGuides: true });
   forgetMeasures();
   S.measuring = null;
   S.drawing = null;

@@ -1,7 +1,8 @@
 // In-browser DICOM loading: groups local files into series and assembles a uint16 volume.
-// Handles single-frame series and multi-frame (enhanced) images in uncompressed
-// little-endian transfer syntaxes.
+// Handles single-frame series and multi-frame (enhanced) images, uncompressed little-endian,
+// deflated, JPEG Lossless and RLE, and turns any slice orientation to the patient axes.
 
+import { CodecError, decodeJpegLossless, decodeRle } from './codecs.ts';
 import type { Point } from './reslice.ts';
 
 export class DicomError extends Error {
@@ -51,11 +52,13 @@ export interface DicomFields {
   orientation?: string;
   comments?: string;
   samples?: number;
+  photometric?: string;
   frames?: string;
   rows?: number;
   cols?: number;
   pixelSpacing?: string;
   bits?: number;
+  bitsStored?: number;
   signed?: number;
   windowCenter?: string;
   windowWidth?: string;
@@ -68,6 +71,8 @@ export interface DicomInfo extends DicomFields {
   pixelOffset: number;
   pixelLength: number;
   transfer: string;
+  // Compressed pixel data: fragments in items from pixelOffset on, length undefined.
+  encapsulated: boolean;
 }
 
 // Files that hold an image: the only ones grouped into series.
@@ -92,7 +97,7 @@ export interface Analysis {
 
 export interface Series {
   id: string;
-  slices: { file: FileLike; info: ImageInfo }[];
+  slices: { file: FileLike; info: ImageInfo; path?: string }[];
   analysis: Analysis | null;
   dir: string;
   patientName: string;
@@ -109,6 +114,8 @@ export interface ScanMeta {
   window: WindowLevel | null;
   percentiles: number[];
   max: number;
+  // MONOCHROME1: the lowest values are meant to be shown white.
+  inverted?: boolean;
   demo?: boolean;
   patientName: string;
   patientId: string;
@@ -127,9 +134,14 @@ const SHARED = 0x52009229, PER_FRAME = 0x52009230;
 const DESCEND = new Set([SHARED, PER_FRAME, 0x00289110, 0x00209113, 0x00209116, 0x00289145, 0x00289132]);
 const UNDEF = 0xffffffff;
 const LONG_VRS = new Set(['OB', 'OD', 'OF', 'OL', 'OV', 'OW', 'SQ', 'SV', 'UC', 'UN', 'UR', 'UT', 'UV']);
-const HEADER_BYTES = 64 * 1024;
+// How much of a file is read for its header, in turn: most headers fit the first window, enhanced
+// multi-frame headers with a group per frame need more, and only a damaged file needs it all.
+const HEADER_WINDOWS = [64 * 1024, 1024 * 1024, 16 * 1024 * 1024];
 const IMPLICIT_LE = '1.2.840.10008.1.2';
 const EXPLICIT_LE = '1.2.840.10008.1.2.1';
+const DEFLATED_LE = '1.2.840.10008.1.2.1.99';
+const RLE = '1.2.840.10008.1.2.5';
+const JPEG_LOSSLESS = new Set(['1.2.840.10008.1.2.4.57', '1.2.840.10008.1.2.4.70']);
 
 // Limits that keep hostile or damaged input from hanging or exhausting the browser.
 export const LIMITS = {
@@ -164,11 +176,13 @@ const WANTED: Record<number, [Field, string]> = {
   0x00200037: ['orientation', 'DS'],
   0x00204000: ['comments', 'LT'],
   0x00280002: ['samples', 'US'],
+  0x00280004: ['photometric', 'CS'],
   0x00280008: ['frames', 'IS'],
   0x00280010: ['rows', 'US'],
   0x00280011: ['cols', 'US'],
   0x00280030: ['pixelSpacing', 'DS'],
   0x00280100: ['bits', 'US'],
+  0x00280101: ['bitsStored', 'US'],
   0x00280103: ['signed', 'US'],
   0x00281050: ['windowCenter', 'DS'],
   0x00281051: ['windowWidth', 'DS'],
@@ -176,17 +190,88 @@ const WANTED: Record<number, [Field, string]> = {
   0x00281053: ['slope', 'DS'],
 };
 
+// Specific Character Set terms read by one browser decoder.
 const CHARSETS: Record<string, string> = {
-  'ISO_IR 192': 'utf-8', 'ISO_IR 100': 'windows-1252', 'ISO_IR 101': 'iso-8859-2',
-  'ISO_IR 126': 'iso-8859-7', 'ISO_IR 144': 'iso-8859-5', 'ISO_IR 148': 'windows-1254',
+  'ISO_IR 192': 'utf-8', 'ISO_IR 100': 'windows-1252', 'ISO_IR 101': 'iso-8859-2', 'ISO_IR 109': 'iso-8859-3',
+  'ISO_IR 110': 'iso-8859-4', 'ISO_IR 126': 'iso-8859-7', 'ISO_IR 127': 'iso-8859-6', 'ISO_IR 138': 'iso-8859-8',
+  'ISO_IR 144': 'iso-8859-5', 'ISO_IR 148': 'windows-1254', 'ISO_IR 166': 'windows-874', 'ISO_IR 203': 'iso-8859-15',
+  'ISO_IR 13': 'shift_jis', 'GB18030': 'gb18030', 'GBK': 'gbk',
 };
 
+// ISO 2022 code extensions (Japanese, Korean, simplified Chinese, mixed scripts): escape sequences
+// switch what the 7-bit (G0) and 8-bit (G1) bytes mean. 'kana' is JIS X 0201 katakana.
+const ESCAPES: Record<string, ['g0' | 'g1', string]> = {
+  '(B': ['g0', 'ascii'], '(J': ['g0', 'ascii'], '$B': ['g0', 'jis0208'], '$@': ['g0', 'jis0208'], '$(D': ['g0', 'jis0212'],
+  ')I': ['g1', 'kana'], '$)C': ['g1', 'euc-kr'], '$)A': ['g1', 'gb18030'],
+  '-A': ['g1', 'windows-1252'], '-B': ['g1', 'iso-8859-2'], '-C': ['g1', 'iso-8859-3'], '-D': ['g1', 'iso-8859-4'],
+  '-F': ['g1', 'iso-8859-7'], '-G': ['g1', 'iso-8859-6'], '-H': ['g1', 'iso-8859-8'], '-L': ['g1', 'iso-8859-5'],
+  '-M': ['g1', 'windows-1254'], '-T': ['g1', 'windows-874'], '-b': ['g1', 'iso-8859-15'],
+};
+// The G1 set a first ISO 2022 term starts with.
+const ISO2022_G1: Record<string, string> = {
+  'ISO 2022 IR 100': 'windows-1252', 'ISO 2022 IR 101': 'iso-8859-2', 'ISO 2022 IR 109': 'iso-8859-3',
+  'ISO 2022 IR 110': 'iso-8859-4', 'ISO 2022 IR 126': 'iso-8859-7', 'ISO 2022 IR 127': 'iso-8859-6',
+  'ISO 2022 IR 138': 'iso-8859-8', 'ISO 2022 IR 144': 'iso-8859-5', 'ISO 2022 IR 148': 'windows-1254',
+  'ISO 2022 IR 166': 'windows-874', 'ISO 2022 IR 203': 'iso-8859-15', 'ISO 2022 IR 13': 'kana',
+  'ISO 2022 IR 149': 'euc-kr', 'ISO 2022 IR 58': 'gb18030',
+};
+
+const decoders = new Map<string, TextDecoder>();
+function decoder(label: string) {
+  let d = decoders.get(label);
+  if (!d) decoders.set(label, d = new TextDecoder(label));
+  return d;
+}
+
+// How text values are read under a Specific Character Set (0008,0005).
+export function textDecoder(charset: string): (bytes: Uint8Array) => string {
+  const terms = charset.split('\\').map((s) => s.trim());
+  if (!terms.some((s) => s.startsWith('ISO 2022'))) {
+    const d = decoder(CHARSETS[terms.find((s) => CHARSETS[s]) ?? ''] ?? 'windows-1252');
+    return (bytes) => d.decode(bytes);
+  }
+  const first = ISO2022_G1[terms[0]] ?? null;
+  // 7-bit bytes: ASCII, or JIS X 0208/0212 pairs, read as EUC-JP with the high bit set.
+  const gl = (run: Uint8Array, set: string) => {
+    if (set === 'ascii') return decoder('windows-1252').decode(run);
+    const out: number[] = [];
+    for (let i = 0; i < run.length; i++) {
+      const b = run[i];
+      if (b < 0x21 || b > 0x7e) { out.push(b); continue; }
+      if (set === 'jis0212') out.push(0x8f);
+      out.push(b | 0x80, (run[++i] ?? 0) | 0x80);
+    }
+    return decoder('euc-jp').decode(new Uint8Array(out));
+  };
+  const gr = (run: Uint8Array, set: string | null) => decoder(set === 'kana' ? 'shift_jis' : set ?? 'windows-1252').decode(run);
+  return (bytes) => {
+    let g0 = 'ascii', g1 = first, out = '';
+    for (let i = 0; i < bytes.length;) {
+      if (bytes[i] === 0x1b) {
+        const seq = [3, 2].map((n) => String.fromCharCode(...bytes.subarray(i + 1, i + 1 + n))).find((s) => ESCAPES[s]);
+        if (seq) {
+          const [which, set] = ESCAPES[seq];
+          if (which === 'g0') g0 = set; else g1 = set;
+          i += 1 + seq.length;
+        } else {
+          i++;
+        }
+        continue;
+      }
+      const high = bytes[i] >= 0x80;
+      let j = i;
+      while (j < bytes.length && bytes[j] !== 0x1b && (bytes[j] >= 0x80) === high) j++;
+      out += high ? gr(bytes.subarray(i, j), g1) : gl(bytes.subarray(i, j), g0);
+      i = j;
+    }
+    return out;
+  };
+}
+
+// Compressed transfer syntaxes the viewer cannot decode, named for the error message.
 const COMPRESSED: Record<string, string> = {
-  '1.2.840.10008.1.2.5': 'RLE Lossless',
   '1.2.840.10008.1.2.4.50': 'JPEG Baseline',
   '1.2.840.10008.1.2.4.51': 'JPEG Extended',
-  '1.2.840.10008.1.2.4.57': 'JPEG Lossless',
-  '1.2.840.10008.1.2.4.70': 'JPEG Lossless',
   '1.2.840.10008.1.2.4.80': 'JPEG-LS Lossless',
   '1.2.840.10008.1.2.4.81': 'JPEG-LS',
   '1.2.840.10008.1.2.4.90': 'JPEG 2000 Lossless',
@@ -198,7 +283,8 @@ const COMPRESSED: Record<string, string> = {
 class NeedMore extends Error {}
 
 // Parse everything up to the pixel data. Throws NeedMore if the buffer ends first.
-export function parseHeader(buffer: ArrayBuffer): DicomInfo {
+// inflated: a deflated file whose dataset has already been inflated.
+export function parseHeader(buffer: ArrayBuffer, inflated = false): DicomInfo {
   const len = buffer.byteLength;
   const dv = new DataView(buffer);
   const u8 = new Uint8Array(buffer);
@@ -210,22 +296,23 @@ export function parseHeader(buffer: ArrayBuffer): DicomInfo {
   }
   let explicit = preamble || isVr(u8[4], u8[5]);
   let transfer = explicit ? EXPLICIT_LE : IMPLICIT_LE;
-  let decoder = new TextDecoder('windows-1252');
+  let decode = textDecoder('');
   // Top-level values win over the same values found inside functional groups.
   const top: Record<string, string | number> = {};
   const nested: Record<string, string | number> = {};
   const framePositions: string[] = [];
-  let pixelOffset = -1, pixelLength = 0;
+  let pixelOffset = -1, pixelLength = 0, encapsulated = false;
 
   interface Head { tag: number; vr: string | null; length: number; size: number }
-  interface Context { top?: boolean; skip?: boolean; frame?: number; seq?: number }
+  // implicit: inside an undefined-length UN element, whose contents are always implicit VR.
+  interface Context { top?: boolean; skip?: boolean; frame?: number; seq?: number; implicit?: boolean }
 
-  const head = (p: number): Head => {
+  const head = (p: number, implicit = false): Head => {
     if (p + 8 > len) throw new NeedMore();
     const group = dv.getUint16(p, true), elem = dv.getUint16(p + 2, true);
     const tag = ((group << 16) | elem) >>> 0;
     if (group === 0xfffe) return { tag, vr: null, length: dv.getUint32(p + 4, true), size: 8 };
-    if (explicit || group === 0x0002) {
+    if ((explicit && !implicit) || group === 0x0002) {
       const vr = String.fromCharCode(u8[p + 4], u8[p + 5]);
       if (LONG_VRS.has(vr)) {
         if (p + 12 > len) throw new NeedMore();
@@ -237,7 +324,7 @@ export function parseHeader(buffer: ArrayBuffer): DicomInfo {
     return { tag, vr, length: dv.getUint32(p + 4, true), size: 8 };
   };
 
-  const text = (p: number, n: number) => decoder.decode(u8.subarray(p, p + n)).replace(/[\0\s]+$/, '').replace(/^\s+/, '');
+  const text = (p: number, n: number) => decode(u8.subarray(p, p + n)).replace(/[\0\s]+$/, '').replace(/^\s+/, '');
 
   const store = (h: Head, p: number, ctx: Context) => {
     const want = WANTED[h.tag];
@@ -247,10 +334,7 @@ export function parseHeader(buffer: ArrayBuffer): DicomInfo {
     const value = vr === 'US' ? (h.length >= 2 ? dv.getUint16(p, true) : 0) : text(p, h.length);
     if (ctx.top) {
       top[key] = value;
-      if (key === 'charset' && typeof value === 'string') {
-        const name = CHARSETS[(value.split('\\').pop() ?? '').trim()];
-        if (name) decoder = new TextDecoder(name);
-      }
+      if (key === 'charset' && typeof value === 'string') decode = textDecoder(value);
     } else if (ctx.frame !== undefined && key === 'position') {
       framePositions[ctx.frame] = String(value);
     } else if (!(key in nested)) {
@@ -262,17 +346,21 @@ export function parseHeader(buffer: ArrayBuffer): DicomInfo {
   // or -1 once the top-level pixel data is reached.
   const walk = (p: number, end: number, ctx: Context): number => {
     while (p < end) {
-      const h = head(p);
+      const h = head(p, ctx.implicit);
       if (h.tag === ITEM_DELIM) return p + 8;
       if (ctx.top && h.tag === PIXEL_DATA) {
-        if (h.length === UNDEF) throw new DicomError('compressed', COMPRESSED[transfer] || transfer);
+        if (h.length === UNDEF) {
+          if (transfer !== RLE && !JPEG_LOSSLESS.has(transfer)) throw new DicomError('compressed', COMPRESSED[transfer] || transfer);
+          encapsulated = true;
+        }
         pixelOffset = p + h.size;
         pixelLength = h.length;
         return -1;
       }
       const value = p + h.size;
       if (h.vr === 'SQ' || h.length === UNDEF) {
-        const inner: Context = ctx.skip || !DESCEND.has(h.tag) ? { skip: true } : { frame: ctx.frame, seq: h.tag };
+        const implicit = ctx.implicit || h.vr === 'UN';
+        const inner: Context = ctx.skip || !DESCEND.has(h.tag) ? { skip: true, implicit } : { frame: ctx.frame, seq: h.tag, implicit };
         p = sequence(value, h.length, inner);
         continue;
       }
@@ -280,7 +368,7 @@ export function parseHeader(buffer: ArrayBuffer): DicomInfo {
         // File meta is always explicit VR; the transfer syntax decides the dataset's encoding.
         transfer = text(value, h.length);
         if (transfer === '1.2.840.10008.1.2.2') throw new DicomError('bigEndian');
-        if (transfer === '1.2.840.10008.1.2.1.99') throw new DicomError('deflated');
+        if (transfer === DEFLATED_LE && !inflated) throw new DicomError('deflated');
         explicit = transfer !== IMPLICIT_LE;
       }
       store(h, value, ctx);
@@ -295,7 +383,7 @@ export function parseHeader(buffer: ArrayBuffer): DicomInfo {
     const end = length === UNDEF ? Infinity : p + length;
     let index = 0;
     while (p < end) {
-      const h = head(p);
+      const h = head(p, ctx.implicit);
       p += 8;
       if (h.tag === SEQ_DELIM) break;
       if (h.tag !== ITEM) {
@@ -306,7 +394,7 @@ export function parseHeader(buffer: ArrayBuffer): DicomInfo {
         p += h.length;
       } else {
         const itemEnd = h.length === UNDEF ? Infinity : p + h.length;
-        const itemCtx = ctx.skip ? ctx : { frame: ctx.seq === PER_FRAME ? index : ctx.frame };
+        const itemCtx = ctx.skip ? ctx : { frame: ctx.seq === PER_FRAME ? index : ctx.frame, implicit: ctx.implicit };
         p = walk(p, itemEnd, itemCtx);
       }
       index++;
@@ -317,7 +405,7 @@ export function parseHeader(buffer: ArrayBuffer): DicomInfo {
 
   walk(preamble ? 132 : 0, Infinity, { top: true });
   // WANTED decides each field's type: numbers for US, text for the rest.
-  const out = { ...nested, ...top, framePositions, pixelOffset, pixelLength, transfer } as DicomInfo;
+  const out = { ...nested, ...top, framePositions, pixelOffset, pixelLength, transfer, encapsulated } as DicomInfo;
 
   const frames = num(out.frames, 1);
   if ((out.rows ?? 0) > LIMITS.dimension || (out.cols ?? 0) > LIMITS.dimension || frames > LIMITS.frames || frames < 1) {
@@ -326,7 +414,9 @@ export function parseHeader(buffer: ArrayBuffer): DicomInfo {
   return out;
 }
 
-async function readHeader(file: FileLike): Promise<DicomInfo> {
+// A file's header, and the file to read its pixels from: a deflated file is replaced by its
+// inflated copy.
+async function readHeader(file: FileLike): Promise<{ info: DicomInfo; file: FileLike }> {
   const attempt = async (blob: Readable) => {
     try {
       return parseHeader(await blob.arrayBuffer());
@@ -336,21 +426,65 @@ async function readHeader(file: FileLike): Promise<DicomInfo> {
       return null;
     }
   };
-  if (file.size > HEADER_BYTES) {
-    const info = await attempt(file.slice(0, HEADER_BYTES));
-    if (info) return info;
+  try {
+    for (const size of HEADER_WINDOWS) {
+      if (file.size <= size) break;
+      const info = await attempt(file.slice(0, size));
+      if (info) return { info, file };
+    }
+    const info = await attempt(file);
+    if (!info) throw new DicomError('noPixels');
+    return { info, file };
+  } catch (err) {
+    if (err instanceof DicomError && err.code === 'deflated') return inflateDataset(file);
+    throw err;
   }
-  const info = await attempt(file);
-  if (!info) throw new DicomError('noPixels');
-  return info;
+}
+
+// Deflated explicit VR little endian: everything after the file meta group is one deflate stream.
+async function inflateDataset(file: FileLike): Promise<{ info: DicomInfo; file: FileLike }> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let p = 132;
+  while (p + 8 <= bytes.length && dv.getUint16(p, true) === 0x0002) {
+    const long = LONG_VRS.has(String.fromCharCode(bytes[p + 4], bytes[p + 5]));
+    p += long ? 12 + (p + 12 <= bytes.length ? dv.getUint32(p + 8, true) : 0) : 8 + dv.getUint16(p + 6, true);
+  }
+  if (p > bytes.length) throw new DicomError('invalid');
+  const chunks: Uint8Array<ArrayBuffer>[] = [bytes.subarray(0, p)];
+  let total = 0;
+  try {
+    const reader = new Blob([bytes.subarray(p)]).stream().pipeThrough(new DecompressionStream('deflate-raw')).getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.length;
+      if (total > LIMITS.volumeBytes) {
+        reader.cancel().catch(() => {});
+        throw new DicomError('tooLarge', `${Math.round(total / 1048576)} MB`);
+      }
+      chunks.push(value);
+    }
+  } catch (err) {
+    throw err instanceof DicomError ? err : new DicomError('invalid');
+  }
+  const inflated = new Blob(chunks);
+  try {
+    return { info: parseHeader(await inflated.arrayBuffer(), true), file: inflated };
+  } catch (err) {
+    throw err instanceof DicomError ? err : new DicomError(err instanceof NeedMore ? 'noPixels' : 'invalid');
+  }
 }
 
 const nums = (s: string | number | undefined) => (s ? String(s).split('\\').map(Number).filter((v) => !Number.isNaN(v)) : []);
 const num = (s: string | number | undefined, d: number) => { const v = nums(s)[0]; return v === undefined ? d : v; };
 
+// Family and given name. Alphabetic, ideographic and phonetic forms are separated by '=';
+// the first one present is shown.
 export function personName(s: string | undefined) {
   if (!s) return '';
-  return s.split('=')[0].split('^').map((p) => p.trim()).filter(Boolean).slice(0, 2).join(' ');
+  const group = s.split('=').find((g) => g.replace(/\^/g, '').trim()) ?? '';
+  return group.split('^').map((p) => p.trim()).filter(Boolean).slice(0, 2).join(' ');
 }
 
 export function formatDate(s: string | undefined) {
@@ -383,13 +517,14 @@ export async function scanEntries(entries: Entry[], onProgress?: ((fraction: num
   parseXml: (text: string) => Analysis | null = parseAnalysis): Promise<Series[]> {
   if (entries.length > LIMITS.files) throw new DicomError('tooMany', String(entries.length));
   const lower = (e: Entry) => e.path.toLowerCase();
-  let candidates = entries.filter((e) => lower(e).endsWith('.dcm') || lower(e).endsWith('.dicom'));
-  if (!candidates.length) {
-    const others = entries.filter((e) => !/\.(xml|txt|exe|dll|ini|html?|jpe?g|png|pdf|zip|js|css|json)$/i.test(e.path)
-      && !/(^|\/)dicomdir$/i.test(e.path));
-    const flags = await Promise.all(others.map((e) => hasDicomMagic(e.file)));
-    candidates = others.filter((_, i) => flags[i]);
-  }
+  const named = (e: Entry) => lower(e).endsWith('.dcm') || lower(e).endsWith('.dicom');
+  // Files without the extension are checked too: a CD can hold its volume as DICOM/IM* files
+  // next to a single .dcm (a 2D image or a sample) that must not hide it.
+  const others = entries.filter((e) => !named(e) && !/\.(xml|txt|exe|dll|ini|html?|jpe?g|png|pdf|zip|js|css|json)$/i.test(e.path)
+    && !/(^|\/)dicomdir$/i.test(e.path));
+  const flags: boolean[] = [];
+  await pool(others, 16, async (e, i) => { flags[i] = await hasDicomMagic(e.file); });
+  const candidates = [...entries.filter(named), ...others.filter((_, i) => flags[i])];
 
   interface Group { key: string; dir: string; uid: string; slices: Series['slices'] }
   const groups = new Map<string, Group>();
@@ -397,12 +532,12 @@ export async function scanEntries(entries: Entry[], onProgress?: ((fraction: num
   let firstError: unknown = null;
   await pool(candidates, 16, async (e) => {
     try {
-      const info = await readHeader(e.file);
+      const { info, file } = await readHeader(e.file);
       if (hasImage(info)) {
         const key = `${info.seriesUid || ''}|${dirOf(e.path)}`;
         let group = groups.get(key);
         if (!group) groups.set(key, group = { key, dir: dirOf(e.path), uid: info.seriesUid || '', slices: [] });
-        group.slices.push({ file: e.file, info });
+        group.slices.push({ file, info, path: e.path });
       }
     } catch (err) {
       if (!firstError || (err instanceof DicomError && err.code === 'compressed')) firstError = err;
@@ -467,6 +602,115 @@ export function volumeStats(data: Uint16Array, nx: number, ny: number, nz: numbe
   return { max, percentiles: [percentile(0.01), percentile(0.998)] };
 }
 
+// Encapsulated pixel data: an offset table item, then fragments up to the sequence delimiter.
+// Returns each frame's compressed bytes.
+async function encapsulatedFrames(file: FileLike, offset: number, frames: number): Promise<Uint8Array[]> {
+  const bytes = new Uint8Array(await file.slice(offset, file.size).arrayBuffer());
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const items: { at: number; start: number; end: number }[] = [];
+  for (let p = 0; p + 8 <= bytes.length;) {
+    const group = dv.getUint16(p, true), elem = dv.getUint16(p + 2, true), length = dv.getUint32(p + 4, true);
+    if (group !== 0xfffe || (elem !== 0xe000 && elem !== 0xe0dd)) throw new DicomError('invalid');
+    if (elem === 0xe0dd) break;
+    if (p + 8 + length > bytes.length) throw new DicomError('truncated');
+    items.push({ at: p, start: p + 8, end: p + 8 + length });
+    p += 8 + length;
+  }
+  const [table, ...fragments] = items;
+  if (!fragments.length) throw new DicomError('truncated');
+
+  // Which fragments make up each frame: the offset table says, or one fragment per frame,
+  // or for JPEG each frame starts with its own start-of-image marker.
+  let groups: (typeof fragments)[] = [];
+  const offsets: number[] = [];
+  for (let p = table.start; p + 4 <= table.end; p += 4) offsets.push(dv.getUint32(p, true));
+  const ascending = offsets.every((o, i) => (i ? o > offsets[i - 1] : o === 0));
+  if (frames === 1) {
+    groups = [fragments];
+  } else if (offsets.length === frames && ascending) {
+    groups = offsets.map(() => []);
+    let f = 0;
+    for (const fr of fragments) {
+      while (f + 1 < frames && fr.at - fragments[0].at >= offsets[f + 1]) f++;
+      groups[f].push(fr);
+    }
+  } else if (fragments.length === frames) {
+    groups = fragments.map((fr) => [fr]);
+  } else {
+    for (const fr of fragments) {
+      if (!groups.length || (bytes[fr.start] === 0xff && bytes[fr.start + 1] === 0xd8)) groups.push([]);
+      groups[groups.length - 1].push(fr);
+    }
+  }
+  if (groups.length !== frames || groups.some((g) => !g.length)) throw new DicomError('invalid');
+  return groups.map((g) => {
+    if (g.length === 1) return bytes.subarray(g[0].start, g[0].end);
+    const out = new Uint8Array(g.reduce((n, fr) => n + fr.end - fr.start, 0));
+    let o = 0;
+    for (const fr of g) { out.set(bytes.subarray(fr.start, fr.end), o); o += fr.end - fr.start; }
+    return out;
+  });
+}
+
+// One compressed frame as little-endian samples, like an uncompressed one.
+function decodeFrame(bytes: Uint8Array, transfer: string, rows: number, cols: number, bits: number): ArrayBuffer {
+  let px: Uint8Array | Uint16Array;
+  try {
+    if (transfer === RLE) {
+      px = decodeRle(bytes, rows, cols, bits);
+    } else {
+      const image = decodeJpegLossless(bytes);
+      if (image.width !== cols || image.height !== rows) throw new DicomError('invalid');
+      px = bits === 8 ? Uint8Array.from(image.pixels) : image.pixels;
+    }
+  } catch (err) {
+    if (err instanceof CodecError) throw new DicomError(err.code, err.detail ?? '');
+    throw err;
+  }
+  return px.byteOffset === 0 && px.byteLength === px.buffer.byteLength ? px.buffer as ArrayBuffer : px.slice().buffer;
+}
+
+// Stored axes to patient axes. Each stored axis (columns, rows, slices) runs along the patient
+// axis closest to its direction: x to the patient's left, y posterior, z superior. Returns null
+// when the scan is already stored that way, or too oblique to tell.
+export function toPatientAxes(dims: number[], directions: number[][]) {
+  const along = directions.map((d) => {
+    const size = d.map(Math.abs);
+    const k = size.indexOf(Math.max(...size));
+    return { k, flip: d[k] < 0 };
+  });
+  if (along.every((a, i) => a.k === i && !a.flip) || new Set(along.map((a) => a.k)).size < 3) return null;
+  const out = [0, 0, 0];
+  along.forEach((a, i) => { out[a.k] = dims[i]; });
+  // Where a stored point lands, in voxels.
+  const point = (p: number[]) => {
+    const q = [0, 0, 0];
+    along.forEach((a, i) => { q[a.k] = a.flip ? dims[i] - 1 - p[i] : p[i]; });
+    return [...q, ...p.slice(3)];
+  };
+  const reorder = <T>(v: T[]) => { const q = v.slice(); along.forEach((a, i) => { q[a.k] = v[i]; }); return q; };
+  const transform = (data: Uint16Array) => {
+    let moved: Uint16Array;
+    try {
+      moved = new Uint16Array(data.length);
+    } catch {
+      throw new DicomError('tooLarge', `${Math.round((data.length * 2) / 1048576)} MB`);
+    }
+    const strides = [1, out[0], out[0] * out[1]];
+    const step = along.map((a) => (a.flip ? -strides[a.k] : strides[a.k]));
+    const start = along.reduce((s, a, i) => s + (a.flip ? (dims[i] - 1) * strides[a.k] : 0), 0);
+    let p = 0;
+    for (let k = 0; k < dims[2]; k++) {
+      for (let j = 0; j < dims[1]; j++) {
+        let o = start + k * step[2] + j * step[1];
+        for (let i = 0; i < dims[0]; i++, o += step[0]) moved[o] = data[p++];
+      }
+    }
+    return moved;
+  };
+  return { dims: out, point, reorder, transform };
+}
+
 export async function loadSeries(series: Series, onProgress?: (fraction: number) => void): Promise<{ meta: ScanMeta; data: Uint16Array }> {
   const first = series.slices[0].info;
   const rows = first.rows, cols = first.cols;
@@ -474,6 +718,7 @@ export async function loadSeries(series: Series, onProgress?: (fraction: number)
   const bits = first.bits || 16;
   if (bits !== 8 && bits !== 16) throw new DicomError('bits', String(bits));
   const signed = first.signed === 1;
+  const stored = Math.min(bits, Math.max(1, first.bitsStored || bits));
   const nxy = rows * cols;
   const frameBytes = nxy * (bits / 8);
 
@@ -482,16 +727,29 @@ export async function loadSeries(series: Series, onProgress?: (fraction: number)
   const normal = [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
   const along = (p: number[]) => p[0] * normal[0] + p[1] * normal[1] + p[2] * normal[2];
   const step = num(first.spacingBetween, 0) || num(first.sliceThickness, 0) || 1;
+  // Slices without a position go by Instance Number, or failing that by file name.
+  const byName = [...series.slices].sort((x, y) => (x.path ?? '').localeCompare(y.path ?? '', 'en', { numeric: true }));
+  const nameOrder = new Map(byName.map((s, i) => [s, i]));
 
-  const frames: { file: FileLike; offset: number; pos: number }[] = [];
+  // Compressed frames come from their file's fragments, read once per file.
+  const fragments = new Map<FileLike, Promise<Uint8Array[]>>();
+  const compressed = (s: Series['slices'][number], f: number, n: number) => async () => {
+    let list = fragments.get(s.file);
+    if (!list) fragments.set(s.file, list = encapsulatedFrames(s.file, s.info.pixelOffset, n));
+    return decodeFrame((await list)[f], s.info.transfer, rows, cols, bits);
+  };
+
+  const frames: { read: () => Promise<ArrayBuffer>; pos: number }[] = [];
   for (const s of series.slices) {
     if (s.info.rows !== rows || s.info.cols !== cols) throw new DicomError('sizes');
     const n = Math.max(1, num(s.info.frames, 1));
-    if (s.info.pixelLength < n * frameBytes) throw new DicomError('truncated');
+    if (!s.info.encapsulated && s.info.pixelLength < n * frameBytes) throw new DicomError('truncated');
     for (let f = 0; f < n; f++) {
       const p = nums(n > 1 ? s.info.framePositions[f] : s.info.position);
-      const pos = p.length === 3 ? along(p) : n > 1 ? f * step : num(s.info.instance, 0);
-      frames.push({ file: s.file, offset: s.info.pixelOffset + f * frameBytes, pos });
+      const pos = p.length === 3 ? along(p) : n > 1 ? f * step : (nums(s.info.instance)[0] ?? nameOrder.get(s) ?? 0) * step;
+      const offset = s.info.pixelOffset + f * frameBytes;
+      const read = s.info.encapsulated ? compressed(s, f, n) : () => s.file.slice(offset, offset + frameBytes).arrayBuffer();
+      frames.push({ read, pos });
     }
   }
   frames.sort((x, y) => x.pos - y.pos);
@@ -505,16 +763,18 @@ export async function loadSeries(series: Series, onProgress?: (fraction: number)
     throw new DicomError('tooLarge', `${Math.round((nxy * nz * 2) / 1048576)} MB`);
   }
 
+  // Signed values are moved up by 32768 (the intercept takes it back off) and sign-extended from
+  // Bits Stored, since some files leave the bits above it clear. Unsigned values are kept as they
+  // are: some scanners store values above Bits Stored, and masking would wrap them.
+  const mask = 2 ** stored - 1, sign = 2 ** (stored - 1);
   let done = 0;
   await pool(frames, 8, async (fr, i) => {
-    const ab = await fr.file.slice(fr.offset, fr.offset + frameBytes).arrayBuffer();
+    const ab = await fr.read();
     if (ab.byteLength < frameBytes) throw new DicomError('truncated');
     const base = i * nxy;
-    if (bits === 8) data.set(new Uint8Array(ab), base);
-    else if (signed) {
-      const src = new Int16Array(ab);
-      for (let k = 0; k < nxy; k++) data[base + k] = src[k] + 32768;
-    } else data.set(new Uint16Array(ab), base);
+    const src = bits === 8 ? new Uint8Array(ab, 0, nxy) : new Uint16Array(ab, 0, nxy);
+    if (!signed) data.set(src, base);
+    else for (let k = 0; k < nxy; k++) { const v = src[k] & mask; data[base + k] = (v & sign ? v - mask - 1 : v) + 32768; }
     done++;
     if (onProgress && done % 4 === 0) onProgress(done / nz);
   });
@@ -524,21 +784,41 @@ export async function loadSeries(series: Series, onProgress?: (fraction: number)
   diffs.sort((x, y) => x - y);
   const sane = (v: number) => (Number.isFinite(v) && v > 0.005 && v < 20 ? v : 1);
   const dz = sane(diffs.length ? Math.abs(diffs[diffs.length >> 1]) : num(first.sliceThickness, 1));
-  const spacing = nums(first.pixelSpacing).map(sane);
+  const pixelSpacing = nums(first.pixelSpacing).map(sane);
   const slope = num(first.slope, 1);
   let intercept = num(first.intercept, 0);
   if (signed) intercept -= 32768 * slope;
   const wc = nums(first.windowCenter)[0], ww = nums(first.windowWidth)[0];
-  const stats = volumeStats(data, cols, rows, nz);
+
+  let dims = [cols, rows, nz];
+  let spacing = [pixelSpacing[1] ?? 1, pixelSpacing[0] ?? 1, dz];
+  let analysis = series.analysis;
+  const turn = toPatientAxes(dims, [a, b, normal]);
+  if (turn) {
+    data = turn.transform(data);
+    dims = turn.dims;
+    spacing = turn.reorder(spacing);
+    if (analysis) {
+      const pts = (list: Point[]) => list.map(turn.point);
+      analysis = {
+        ...analysis,
+        arches: analysis.arches.map((arch) => ({ ...arch, points: pts(arch.points) })),
+        canals: analysis.canals.map((c) => ({ ...c, points: pts(c.points) })),
+        ortho: analysis.ortho && turn.point(analysis.ortho),
+      };
+    }
+  }
+  const stats = volumeStats(data, dims[0], dims[1], dims[2]);
 
   const meta: ScanMeta = {
-    dims: [cols, rows, nz],
-    spacing: [spacing[1] ?? 1, spacing[0] ?? 1, dz],
+    dims: [dims[0], dims[1], dims[2]],
+    spacing: [spacing[0], spacing[1], spacing[2]],
     slope,
     intercept,
     window: wc !== undefined && ww !== undefined ? { center: wc, width: ww } : null,
     percentiles: stats.percentiles,
     max: stats.max,
+    inverted: first.photometric === 'MONOCHROME1',
     patientName: personName(first.patientName),
     patientId: first.patientId || '',
     birthDate: formatDate(first.birthDate),
@@ -547,7 +827,7 @@ export async function loadSeries(series: Series, onProgress?: (fraction: number)
     manufacturer: first.manufacturer || '',
     kvp: first.kvp || '',
     comments: first.comments || '',
-    analysis: series.analysis,
+    analysis,
   };
   return { meta, data };
 }

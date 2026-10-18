@@ -77,11 +77,12 @@ The online version is served by GitHub Pages, which, like any web host, sees tha
 ## Supported scans
 
 - DICOM CT series, one file per slice (with or without the `.dcm` extension) or a single multi-frame file.
-- Uncompressed transfer syntaxes: implicit and explicit VR little endian; 8- or 16-bit, signed or unsigned.
-- Character sets including UTF-8 and Greek (ISO 8859-7), so Greek patient names display correctly.
+- Slices stored in any orientation: coronal, sagittal or mirrored scans are turned to the patient axes.
+- Transfer syntaxes: implicit and explicit VR little endian, deflated, JPEG Lossless and RLE Lossless; 8- or 16-bit, signed or unsigned, MONOCHROME1 or MONOCHROME2.
+- Character sets including UTF-8, Greek (ISO 8859-7), Japanese, Korean and Chinese (ISO 2022, GB18030), so patient names display correctly.
 - Tested with Carestream CS 8100 3D exports (CS 3D Imaging) and KaVo exports from the public [missing-teeth CBCT dataset](https://doi.org/10.57760/sciencedb.26465) (CC BY 4.0).
 
-Compressed DICOM (JPEG, JPEG 2000, JPEG-LS, RLE) is not supported yet; the viewer says so when it meets one. Most CBCT software can export uncompressed DICOM.
+JPEG 2000, JPEG-LS and lossy JPEG are not supported yet; the viewer says so when it meets one. Most CBCT software can export uncompressed DICOM.
 
 ## Development
 
@@ -89,7 +90,7 @@ The viewer is written in TypeScript and has no runtime dependencies. Node 24 or 
 
 ```sh
 npm run dev        # serve the source at http://127.0.0.1:8080
-npm test           # unit tests: DICOM parsing and limits, ZIP reading, reformatting, PDF writer, translations, build and CSP
+npm test           # unit tests: DICOM parsing and limits, JPEG Lossless and RLE decoding, ZIP reading, reformatting, PDF writer, translations, build and CSP
 npm run typecheck  # strict type checking of the browser code (tsconfig.json) and of the tests and scripts (tsconfig.node.json)
 npm run build      # bundle everything into dist/index.html
 ```
@@ -101,6 +102,7 @@ The tests generate their DICOM files in memory, so no patient data is needed or 
 | File | Purpose |
 |---|---|
 | `src/dicom.ts` | DICOM parsing with input limits, series grouping, volume assembly, CS 3D Imaging analysis files |
+| `src/codecs.ts` | JPEG Lossless and RLE decoders for compressed DICOM |
 | `src/zip.ts` | Reads scans straight from ZIP archives (stored, deflated, ZIP64) without unpacking them |
 | `src/reslice.ts` | Orthogonal, panoramic and cross-sectional reformatting |
 | `src/autoarch.ts` | Finds the dental arch from the teeth when a scan has no analysis |
