@@ -31,6 +31,7 @@ The **?** button opens the user guide; the **ⓘ** button opens About, Privacy a
 | Ctrl + wheel, middle drag | Zoom, pan |
 | Double-click, **F** or ⤢ | Expand a view to fill the window |
 | **S** or the camera icon | Save a view as PNG |
+| **Delete**, **Ctrl+Z** | Remove the newest measurement in the view under the pointer; undo |
 
 On a phone or tablet:
 

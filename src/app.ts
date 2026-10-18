@@ -399,12 +399,12 @@ const hooks: ViewHooks = {
       }
       d.pts.push([pos.u - crossShift(vp, d), pos.v]);
       if (d.pts.length === 3) {
-        S.measures.push(d);
+        setMeasures([...S.measures, d]);
         S.angleDraft = null;
       }
       requestDraw(vp.kind);
       return () => {
-        if (S.measures[S.measures.length - 1] === d) S.measures.pop();
+        if (S.measures[S.measures.length - 1] === d) undoMeasures();
         d.pts.pop();
         S.angleDraft = d;
         requestDraw(vp.kind);
@@ -435,7 +435,7 @@ const hooks: ViewHooks = {
     if (mode === 'measure' && S.measuring) {
       const m = S.measuring;
       S.measuring = null;
-      if (distanceMm(m) > 0.2) S.measures.push(m);
+      if (distanceMm(m) > 0.2) setMeasures([...S.measures, m]);
       requestDraw(vp.kind);
     }
   },
@@ -486,6 +486,37 @@ const hooks: ViewHooks = {
   },
   overlay: drawOverlay,
 };
+
+// Every change to the measurement list replaces it, so Ctrl+Z can step back through them.
+const undoList: Measure[][] = [];
+
+function setMeasures(list: Measure[]) {
+  undoList.push(S.measures);
+  if (undoList.length > 200) undoList.shift();
+  S.measures = list;
+  requestDraw();
+}
+
+function undoMeasures() {
+  const previous = undoList.pop();
+  if (!previous) return;
+  S.measures = previous;
+  requestDraw();
+}
+
+function forgetMeasures() {
+  S.measures = [];
+  undoList.length = 0;
+}
+
+// The newest measurement on screen: in the view under the pointer, or in any view.
+function lastShownMeasure() {
+  for (let i = S.measures.length - 1; i >= 0; i--) {
+    const m = S.measures[i], vp = views[m.kind];
+    if (m.key === vp.measureKey && vp.el?.offsetParent && (!S.hoverKind || S.hoverKind === m.kind)) return i;
+  }
+  return -1;
+}
 
 function distanceMm(m: Distance) {
   return Math.hypot((m.b[0] - m.a[0]) * m.sx, (m.b[1] - m.a[1]) * m.sy);
@@ -1295,7 +1326,11 @@ function bindUi() {
   canals.addEventListener('change', () => { S.showCanals = canals.checked; requestDraw(); });
   const guides = $<HTMLInputElement>('#showGuides');
   guides.addEventListener('change', () => { S.showGuides = guides.checked; requestDraw(); });
-  $('#clearMeasures').addEventListener('click', () => { S.measures = []; S.angleDraft = null; requestDraw(); });
+  $('#clearMeasures').addEventListener('click', () => {
+    if (S.measures.length) setMeasures([]);
+    S.angleDraft = null;
+    requestDraw();
+  });
   $('#resetViews').addEventListener('click', () => {
     const work = S.measures.length > 0 || S.arches.some((a) => a.custom);
     if (work && !confirm(t('reset.confirm'))) return;
@@ -1401,11 +1436,21 @@ function bindUi() {
   });
 
   window.addEventListener('keydown', (e) => {
-    if (target(e)?.matches('input, select, textarea') || e.ctrlKey || e.metaKey || e.altKey) return;
-    const k = e.key;
+    if (target(e)?.matches('input, select, textarea')) return;
+    const helpOpen = !$('#center').hidden;
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'z') {
+      if (helpOpen || !S.vol) return;
+      e.preventDefault();
+      undoMeasures();
+      return;
+    }
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    // Letters work with Shift or Caps Lock on too.
+    const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
     const hovered = S.hoverKind && views[S.hoverKind];
-    if (k === 'Escape' && !$('#center').hidden) {
-      closeCenter();
+    if (helpOpen) {
+      // The help centre has the keyboard while it is open: shortcuts would act on the hidden views.
+      if (k === 'Escape') closeCenter();
     } else if (k === 'Escape' && $('#topbar').classList.contains('open')) {
       setMenu(false);
     } else if (k === 'Escape') {
@@ -1422,8 +1467,8 @@ function bindUi() {
       const dir = k === 'ArrowUp' || k === 'PageUp' ? -1 : 1;
       hooks.scroll(hovered, dir, { shiftKey: e.shiftKey || k.startsWith('Page') });
     } else if (k === 'Delete' || k === 'Backspace') {
-      S.measures.pop();
-      requestDraw();
+      const i = lastShownMeasure();
+      if (i >= 0) setMeasures(S.measures.filter((_, j) => j !== i));
     } else if (k === 'f' && hovered && hovered.el) {
       toggleMax(hovered.el);
     } else if (k === 's' && hovered) {
@@ -1565,8 +1610,9 @@ async function renderPrivacy() {
 function closeScan() {
   Object.assign(S, {
     vol: null, meta: null, lut: null, series: [], arches: [], arch: null, archIdx: -1, canals: [],
-    measures: [], measuring: null, drawing: null, angleDraft: null, start: null,
+    measuring: null, drawing: null, angleDraft: null, start: null,
   });
+  forgetMeasures();
   curveMemo = null;
   fillSeries();
   fillArchSelect();
@@ -1728,7 +1774,7 @@ function restoreOpeningState() {
   const start = S.start;
   if (!S.vol || !start) return;
   Object.assign(S, { ...DEFAULTS, invert: false, showCanals: true, showGuides: true });
-  S.measures = [];
+  forgetMeasures();
   S.measuring = null;
   S.drawing = null;
   S.angleDraft = null;
