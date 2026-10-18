@@ -11,8 +11,8 @@ const MAX32 = 0xffffffff;
 const DIRECTORY_BYTES = 32 * 1024 * 1024;
 // Reads that end within this many bytes inflate only the start of an entry (DICOM headers).
 const PREFIX = 256 * 1024;
-// The last fully inflated entry is kept this long, so a multi-frame file read frame by frame
-// is inflated once rather than once per frame.
+// The last fully inflated entry is kept this long after its last use, so a multi-frame file
+// read frame by frame is inflated once rather than once per frame.
 const KEEP_MS = 1000;
 
 // One file as the central directory describes it.
@@ -63,17 +63,26 @@ async function inflate(blob: Blob, length: number) {
   return out.buffer;
 }
 
-let kept: { entry: ZipEntry; promise: Promise<ArrayBuffer>; timer?: ReturnType<typeof setTimeout> } | null = null;
+interface Kept { entry: ZipEntry; promise: Promise<ArrayBuffer>; settled: boolean; timer?: ReturnType<typeof setTimeout> }
+let kept: Kept | null = null;
+
+function keep(slot: Kept) {
+  clearTimeout(slot.timer);
+  slot.timer = setTimeout(() => { if (kept === slot) kept = null; }, KEEP_MS);
+}
 
 function inflateWhole(entry: ZipEntry) {
   if (kept?.entry !== entry) {
     if (kept) clearTimeout(kept.timer);
-    kept = { entry, promise: entry.raw().then((raw) => inflate(raw, entry.size)) };
+    const slot: Kept = { entry, settled: false, promise: entry.raw().then((raw) => inflate(raw, entry.size)) };
+    kept = slot;
+    // The clock starts once the entry is inflated: a large entry on a slow phone takes longer
+    // than KEEP_MS, and must not be thrown away before the frames waiting for it are read.
+    slot.promise.then(() => { slot.settled = true; keep(slot); }, () => { if (kept === slot) kept = null; });
+  } else if (kept.settled) {
+    keep(kept);
   }
-  const slot = kept;
-  clearTimeout(slot.timer);
-  slot.timer = setTimeout(() => { if (kept === slot) kept = null; }, KEEP_MS);
-  return slot.promise;
+  return kept.promise;
 }
 
 // A file inside the archive with the parts of the File interface the DICOM reader uses.

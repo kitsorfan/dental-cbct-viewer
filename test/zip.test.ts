@@ -4,6 +4,7 @@ import zlib from 'node:zlib';
 import { scanEntries, loadSeries, DicomError } from '../src/dicom.ts';
 import { expandArchives, readZipDirectory } from '../src/zip.ts';
 import { writeDicom, ctSlice, fileEntry } from './dicom-writer.ts';
+import type { DicomElement } from './dicom-writer.ts';
 
 interface ZipFile {
   name: string;
@@ -117,6 +118,36 @@ test('mixes archives with loose files and keeps their paths apart', async () => 
   const zip = makeZip([{ name: 'a.dcm', data: slice(0) }]);
   const entries = await expandArchives([fileEntry(zip, 'Downloads/scan.zip'), fileEntry(slice(1), 'other/b.dcm')]);
   assert.deepEqual(entries.map((e) => e.path), ['Downloads/scan/a.dcm', 'other/b.dcm']);
+});
+
+test('inflates a multi-frame entry once, however long inflating takes', async (t) => {
+  const rows = 384, cols = 384, frames = 24;
+  const pixels = new Uint16Array(rows * cols * frames).map((_, i) => (i * 7) & 0xfff);
+  const extra: DicomElement[] = [[0x00280008, 'IS', String(frames)], [0x00180088, 'DS', '0.2']];
+  const zip = makeZip([{ name: 'scan/volume.dcm', data: writeDicom(ctSlice({ rows, cols, pixels, extra })) }]);
+  const [series] = await scanEntries(await expandArchives([fileEntry(zip, 'scan.zip')]));
+
+  // Hold every inflate until the reader's keep time has passed, as on a slow phone.
+  let inflations = 0, release = () => {};
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const Real = globalThis.DecompressionStream;
+  globalThis.DecompressionStream = class extends Real {
+    constructor(format: CompressionFormat) {
+      super(format);
+      inflations++;
+      Object.defineProperty(this, 'readable', { value: super.readable.pipeThrough(new TransformStream({ start: () => held })) });
+    }
+  };
+  t.after(() => { globalThis.DecompressionStream = Real; });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+
+  const loading = loadSeries(series);
+  await new Promise((resolve) => setImmediate(resolve));
+  t.mock.timers.tick(5000);
+  release();
+  const { data } = await loading;
+  assert.equal(inflations, 1);
+  assert.equal(data[rows * cols * 3 + 5], pixels[rows * cols * 3 + 5]);
 });
 
 test('never inflates more than an entry declares', async () => {
