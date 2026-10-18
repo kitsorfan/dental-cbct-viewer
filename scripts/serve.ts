@@ -15,8 +15,15 @@ const TYPES: Record<string, string> = {
 
 http.createServer((req, res) => {
   const url = new URL(req.url ?? '/', 'http://localhost');
-  let file = path.normalize(path.join(root, decodeURIComponent(url.pathname)));
-  if (!file.startsWith(root)) { res.writeHead(403).end(); return; }
+  let file: string;
+  try {
+    file = path.join(root, decodeURIComponent(url.pathname));
+  } catch {
+    res.writeHead(400).end(); // malformed percent-encoding
+    return;
+  }
+  // root + separator, so that a sibling folder whose name starts like this one stays out of reach.
+  if (file !== root && !file.startsWith(root + path.sep)) { res.writeHead(403).end(); return; }
   if (fs.existsSync(file) && fs.statSync(file).isDirectory()) file = path.join(file, 'index.html');
   fs.readFile(file, (err, body) => {
     if (err) { res.writeHead(404).end('Not found'); return; }
